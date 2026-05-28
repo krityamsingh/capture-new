@@ -1,7 +1,7 @@
 import random
 import time
 from pyrogram import Client, filters
-from . import Grabberu as app, user_collection
+from . import Grabberu as app, user_collection, add, deduct, show
 import asyncio
 from datetime import datetime, timedelta
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -71,30 +71,16 @@ def to_int(value, default=0):
     except (ValueError, TypeError):
         return default
 
-async def update_balance(user_id, amount):
-    await user_collection.update_one(
-        {'id': user_id},
-        {'$setOnInsert': {'balance': 0}},
-        upsert=True
-    )
-    user = await user_collection.find_one({'id': user_id})
-    if user and isinstance(user.get('balance'), str):
-        current_balance = to_int(user['balance'])
-        await user_collection.update_one(
-            {'id': user_id},
-            {'$set': {'balance': current_balance}}
-        )
-    await user_collection.update_one(
-        {'id': user_id},
-        {'$inc': {'balance': to_int(amount)}}
-    )
-
 async def check_balance(user_id, amount):
-    user = await user_collection.find_one({'id': user_id})
-    if not user:
-        return False
-    balance = to_int(user.get('balance', 0))
+    balance = await show(user_id)
     return balance >= amount
+
+async def update_balance(user_id, amount):
+    if amount > 0:
+        await add(user_id, amount)
+    elif amount < 0:
+        await deduct(user_id, -amount)
+
 
 def check_cooldown(user_id, game_type):
     current_time = time.time()
