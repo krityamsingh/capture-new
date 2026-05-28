@@ -31,6 +31,8 @@ from telegram.ext import CommandHandler, CallbackContext, CallbackQueryHandler
 from Grabber import user_collection, collection, application
 from . import capsify
 
+FALLBACK_IMG = "https://telegra.ph/file/lost-character-placeholder.jpg"
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  CONSTANTS
@@ -197,10 +199,26 @@ async def _send_character_media(
             except Exception as e:
                 print(f"⚠️ Failed to download/send photo for character {character.get('id')}: {e}")
 
+        # ── Fallback image path ───────────────────────────────────────────────
+        try:
+            _safe_delete(tmp_path)
+            tmp_path = await _download_to_temp(FALLBACK_IMG, ".jpg")
+            with open(tmp_path, "rb") as fh:
+                await reply_fn(
+                    "photo",
+                    media=fh,
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=keyboard,
+                )
+            return
+        except Exception as e:
+            print(f"⚠️ Failed to download/send fallback photo for character {character.get('id')}: {e}")
+
     finally:
         _safe_delete(tmp_path)
 
-    # ── Fallback ───────────────────────────────────────────────────────────
+    # ── Text Fallback (if fallback image also fails) ───────────────────────
     fallback_text = caption
     if video_url:
         fallback_text += f"\n\n🎬 <a href='{video_url}'>Video Link</a>"
@@ -415,20 +433,38 @@ async def back_to_details(update: Update, context: CallbackContext) -> None:
 
     tmp_path = None
     try:
-        if animated and video_url:
-            tmp_path = await _download_to_temp(video_url, ".mp4")
-            with open(tmp_path, "rb") as fh:
-                await query.edit_message_media(
-                    media=InputMediaVideo(
-                        media=fh,
-                        caption=caption,
-                        parse_mode="HTML",
-                    ),
-                    reply_markup=keyboard,
-                )
+        try:
+            if animated and video_url:
+                tmp_path = await _download_to_temp(video_url, ".mp4")
+                with open(tmp_path, "rb") as fh:
+                    await query.edit_message_media(
+                        media=InputMediaVideo(
+                            media=fh,
+                            caption=caption,
+                            parse_mode="HTML",
+                        ),
+                        reply_markup=keyboard,
+                    )
+                return
 
-        elif img_url:
-            tmp_path = await _download_to_temp(img_url, ".jpg")
+            elif img_url:
+                tmp_path = await _download_to_temp(img_url, ".jpg")
+                with open(tmp_path, "rb") as fh:
+                    await query.edit_message_media(
+                        media=InputMediaPhoto(
+                            media=fh,
+                            caption=caption,
+                            parse_mode="HTML",
+                        ),
+                        reply_markup=keyboard,
+                    )
+                return
+            else:
+                raise ValueError("No media URLs available")
+        except Exception as exc:
+            print(f"⚠️ Failed to edit with original media for character {char_id}: {exc}")
+            _safe_delete(tmp_path)
+            tmp_path = await _download_to_temp(FALLBACK_IMG, ".jpg")
             with open(tmp_path, "rb") as fh:
                 await query.edit_message_media(
                     media=InputMediaPhoto(
@@ -439,13 +475,8 @@ async def back_to_details(update: Update, context: CallbackContext) -> None:
                     reply_markup=keyboard,
                 )
 
-        else:
-            await query.answer(
-                "⚠️ No media available for this character.", show_alert=True
-            )
-
     except Exception as exc:
-        print(f"❌ back_to_details error  char_id={char_id!r}: {exc}")
+        print(f"❌ back_to_details fallback error  char_id={char_id!r}: {exc}")
         await query.answer("❌ Failed to load media. Try again.", show_alert=True)
 
     finally:

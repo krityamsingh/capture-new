@@ -96,6 +96,7 @@ EXCLUDED_RARITIES: set[str] = {
 SMASH_COOLDOWN_SECS  = 10
 CACHE_MAX_AGE_SECS   = 1800   # Re-fetch characters from DB after 30 minutes
 DOWNLOAD_TIMEOUT     = 60
+FALLBACK_IMG         = "https://telegra.ph/file/lost-character-placeholder.jpg"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -455,15 +456,26 @@ async def smash_command(client: Client, message: Message) -> None:
     # because Telegram's servers try to fetch the URL themselves and are blocked.
     tmp_path = None
     try:
-        tmp_path = await _download_to_temp(img_url, ".jpg")
-        with open(tmp_path, "rb") as fh:
-            await message.reply_photo(
-                photo=fh,
-                caption=caption,
-                reply_markup=InlineKeyboardMarkup(buttons),
-            )
+        try:
+            tmp_path = await _download_to_temp(img_url, ".jpg")
+            with open(tmp_path, "rb") as fh:
+                await message.reply_photo(
+                    photo=fh,
+                    caption=caption,
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+        except Exception as exc:
+            print(f"⚠️ Failed to download/send original image for character {character.get('id')} /smash: {exc}")
+            _safe_delete(tmp_path)
+            tmp_path = await _download_to_temp(FALLBACK_IMG, ".jpg")
+            with open(tmp_path, "rb") as fh:
+                await message.reply_photo(
+                    photo=fh,
+                    caption=caption,
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
     except Exception as exc:
-        print(f"❌ /smash send error  user={user_id}  url={img_url!r}: {exc}")
+        print(f"❌ /smash fallback send error  user={user_id}  fallback_url={FALLBACK_IMG!r}: {exc}")
         active_smashes.pop(user_id, None)
         await message.reply_text(
             "**❌ Failed to load the challenger's image.**\n"
