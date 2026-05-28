@@ -34,7 +34,7 @@ from pyrogram.types import Message
 from pyrogram.errors import FloodWait, MessageNotModified
 
 from Grabber import db, collection
-from Grabber.config import OWNER_IDS, CATBOX_USERHASH
+from Grabber.config import OWNER_IDS
 from . import app
 
 
@@ -330,7 +330,7 @@ def _catbox_post(path: str, retries: int = 5) -> str:
                 with open(path, "rb") as fh:
                     r = s.post(
                         "https://catbox.moe/user/api.php",
-                        data={"reqtype": "fileupload", "userhash": CATBOX_USERHASH},
+                        data={"reqtype": "fileupload"},
                         files={"fileToUpload": fh},
                         timeout=(10, 120),
                     )

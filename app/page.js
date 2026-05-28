@@ -722,10 +722,10 @@ export default function CaptrueMiniApp() {
                   style={{ background: '#0e0e1a', border: '1px solid #2d2d4e' }}
                 >
                   {[
-                    ['🔴 Common', '45%'], ['🔵 Uncommon', '25%'],
-                    ['🟠 Rare', '15%'],   ['🟡 Legendary', '8%'],
-                    ['🫧 Premium', '4%'],  ['🔮 Limited Ed.', '2%'],
-                    ['⚜️ Animated', '1% 🔥', true],
+                    ['🔴 Common', '22.5%'], ['🔵 Uncommon', '12.5%'],
+                    ['🟠 Rare', '7.5%'],   ['🟡 Legendary', '4%'],
+                    ['🫧 Premium', '2%'],  ['🔮 Limited Ed.', '1.5%'],
+                    ['⚜️ Animated', '50% 🔥', true],
                   ].map(([r, pct, hot]) => (
                     <div key={r} className={`flex justify-between px-2 py-1 rounded-lg ${hot ? 'font-bold' : ''}`}
                       style={{ background: hot ? '#f59e0b18' : 'transparent', color: hot ? '#f59e0b' : '#94a3b8' }}>

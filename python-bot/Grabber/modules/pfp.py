@@ -4,14 +4,13 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 from . import user_collection, app
 from .block import block_dec, temp_block
-from Grabber.config import CATBOX_USERHASH
 
 CATBOX_API_URL = "https://catbox.moe/user/api.php"
 
 def upload_to_catbox(file_path):
     with open(file_path, 'rb') as file:
         files = {'fileToUpload': file}
-        data = {'reqtype': 'fileupload', 'userhash': CATBOX_USERHASH}
+        data = {'reqtype': 'fileupload'}
         response = requests.post(CATBOX_API_URL, files=files, data=data)
 
     response_text = response.text.strip()

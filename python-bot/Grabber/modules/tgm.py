@@ -5,7 +5,6 @@ from pyrogram import filters, Client
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import MessageNotModified
 from . import app
-from Grabber.config import CATBOX_USERHASH
 
 # Constants
 CATBOX_URL = "https://catbox.moe/user/api.php"
@@ -19,7 +18,6 @@ async def upload_to_catbox(file_path):
             with open(file_path, "rb") as file:
                 data = aiohttp.FormData()
                 data.add_field("reqtype", "fileupload")
-                data.add_field("userhash", CATBOX_USERHASH)
                 data.add_field("fileToUpload", file)
                 
                 async with session.post(CATBOX_URL, data=data) as response:

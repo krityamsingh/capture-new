@@ -226,41 +226,6 @@ def _get_user_stats(user_id: int) -> dict:
     })
 
 
-def _is_animated(character: dict) -> bool:
-    """Return True if this character is a video/animated character."""
-    rarity = character.get("rarity", "")
-    video_url = character.get("video_url", "")
-    img_url = character.get("img_url", "")
-    img_type = character.get("img_type", "")
-    file_extension = character.get("file_extension", "")
-    
-    # 1. Check if rarity implies animation/video
-    rarity_lower = rarity.lower() if rarity else ""
-    if "animated" in rarity_lower or "animation" in rarity_lower:
-        return True
-        
-    # 2. Check if img_type is video
-    if img_type == "video":
-        return True
-        
-    # 3. Check if video_url is set and not empty
-    if video_url:
-        return True
-        
-    # 4. Check if the URL ends with a video extension
-    for url in (video_url, img_url):
-        if url:
-            url_lower = url.lower()
-            if any(url_lower.endswith(ext) for ext in [".mp4", ".gif", ".gifv", ".webm"]):
-                return True
-                
-    # 5. Check if file_extension is a video extension
-    if file_extension and file_extension.lower() in [".mp4", ".gif", ".gifv", ".webm"]:
-        return True
-        
-    return False
-
-
 async def _ensure_cache() -> None:
     """
     Load (or refresh) the character cache from DB.
@@ -277,7 +242,6 @@ async def _ensure_cache() -> None:
         c for c in all_chars
         if c.get("img_url")   # smash requires a photo; skip video-only entries
         and c.get("rarity") not in EXCLUDED_RARITIES
-        and not _is_animated(c)
     ]
     _cache_loaded_at = time.monotonic()
     print(f"🌀 Smash cache refreshed: {len(_character_cache)} eligible characters")

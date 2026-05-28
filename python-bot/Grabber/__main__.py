@@ -5,7 +5,7 @@ from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import CommandHandler, CallbackContext
 
 # Support group and sudo users
-SUPPORT_GROUP_ID = -1003695209406
+SUPPORT_GROUP_ID = -1002313549356
 SUDO_USERS = [6118760915]
 
 # Video & Buttons

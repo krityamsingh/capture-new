@@ -69,37 +69,11 @@ DOWNLOAD_TIMEOUT = 120
 
 def _is_animated(character: dict) -> bool:
     """Return True if this character should be sent as a video."""
-    rarity = character.get("rarity", "")
+    rarity    = character.get("rarity", "")
     video_url = character.get("video_url", "")
-    img_url = character.get("img_url", "")
-    img_type = character.get("img_type", "")
-    file_extension = character.get("file_extension", "")
-    
-    # 1. Check if rarity implies animation/video
-    rarity_lower = rarity.lower() if rarity else ""
-    if "animated" in rarity_lower or "animation" in rarity_lower:
-        return True
-        
-    # 2. Check if img_type is video
-    if img_type == "video":
-        return True
-        
-    # 3. Check if video_url is set and not empty
-    if video_url:
-        return True
-        
-    # 4. Check if the URL ends with a video extension
-    for url in (video_url, img_url):
-        if url:
-            url_lower = url.lower()
-            if any(url_lower.endswith(ext) for ext in [".mp4", ".gif", ".gifv", ".webm"]):
-                return True
-                
-    # 5. Check if file_extension is a video extension
-    if file_extension and file_extension.lower() in [".mp4", ".gif", ".gifv", ".webm"]:
-        return True
-        
-    return False
+    # Treat as animated if rarity matches OR if a video_url is stored
+    # (handles DB rows where rarity label was inconsistent)
+    return rarity in ANIMATION_RARITIES or bool(video_url)
 
 
 def _build_keyboard(char_id: str) -> IKM:
@@ -191,20 +165,9 @@ async def _send_character_media(
 
     tmp_path = None
     try:
-        media_url = (video_url or img_url) if animated else (img_url or video_url)
-        if not media_url:
-            await fallback_reply_fn(
-                capsify("No media found for this character.") + f"\n\n{caption}",
-                parse_mode="HTML",
-                reply_markup=keyboard,
-            )
-            return
-
-        if animated:
-            ext = ".mp4"
-            if ".gif" in media_url.lower():
-                ext = ".gif"
-            tmp_path = await _download_to_temp(media_url, ext)
+        # ── Video path ─────────────────────────────────────────────────────────
+        if animated and video_url:
+            tmp_path = await _download_to_temp(video_url, ".mp4")
             with open(tmp_path, "rb") as fh:
                 await reply_fn(
                     "video",
@@ -214,13 +177,10 @@ async def _send_character_media(
                     reply_markup=keyboard,
                 )
             return
-        else:
-            ext = ".jpg"
-            if ".png" in media_url.lower():
-                ext = ".png"
-            elif ".gif" in media_url.lower():
-                ext = ".gif"
-            tmp_path = await _download_to_temp(media_url, ext)
+
+        # ── Photo path ─────────────────────────────────────────────────────────
+        if img_url:
+            tmp_path = await _download_to_temp(img_url, ".jpg")
             with open(tmp_path, "rb") as fh:
                 await reply_fn(
                     "photo",
@@ -230,6 +190,13 @@ async def _send_character_media(
                     reply_markup=keyboard,
                 )
             return
+
+        # ── No media at all ────────────────────────────────────────────────────
+        await fallback_reply_fn(
+            capsify("No media found for this character.") + f"\n\n{caption}",
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
 
     finally:
         _safe_delete(tmp_path)
@@ -271,8 +238,6 @@ async def details(update: Update, context: CallbackContext) -> None:
                 caption=caption,
                 parse_mode=parse_mode,
                 reply_markup=reply_markup,
-                write_timeout=120,
-                read_timeout=120,
             )
         else:
             await update.message.reply_photo(
@@ -280,8 +245,6 @@ async def details(update: Update, context: CallbackContext) -> None:
                 caption=caption,
                 parse_mode=parse_mode,
                 reply_markup=reply_markup,
-                write_timeout=120,
-                read_timeout=120,
             )
 
     async def _fallback(text, parse_mode, reply_markup):
@@ -293,14 +256,9 @@ async def details(update: Update, context: CallbackContext) -> None:
         await _send_character_media(character, _reply, keyboard, caption, _fallback)
     except Exception as exc:
         print(f"❌ /check error  char_id={char_id!r}: {exc}")
-        try:
-            await update.message.reply_text(
-                f"❌ Failed to load media. Showing details instead:\n\n{caption}",
-                parse_mode="HTML",
-                reply_markup=keyboard,
-            )
-        except Exception as fallback_exc:
-            print(f"❌ /check double fallback error: {fallback_exc}")
+        await update.message.reply_text(
+            capsify("Failed to send media. Please try again later.")
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -325,14 +283,12 @@ async def how_many(update: Update, context: CallbackContext) -> None:
         return
 
     user_id   = query.from_user.id
-    # Robust match: check both integer and string formats for user id
-    user_data = await user_collection.find_one({"$or": [{"id": user_id}, {"id": str(user_id)}]})
+    user_data = await user_collection.find_one({"id": user_id})
 
     count = 0
-    if user_data:
-        characters_list = user_data.get("characters") or user_data.get("waifus") or []
+    if user_data and "characters" in user_data:
         count = sum(
-            1 for c in characters_list
+            1 for c in user_data["characters"]
             if str(c.get("id", "")) == str(char_id)
         )
 
@@ -362,19 +318,11 @@ async def top_grabbers(update: Update, context: CallbackContext) -> None:
         return
 
     # Aggregate: count how many times this char_id appears across all users
-    # We group by id and extract first_name/last_name/username from the documents
-    # to avoid slow and rate-limited Telegram API get_chat calls.
     pipeline = [
         {"$match":  {"characters.id": char_id}},
         {"$unwind": "$characters"},
         {"$match":  {"characters.id": char_id}},
-        {"$group":  {
-            "_id": "$id",
-            "count": {"$sum": 1},
-            "first_name": {"$first": "$first_name"},
-            "last_name": {"$first": "$last_name"},
-            "username": {"$first": "$username"}
-        }},
+        {"$group":  {"_id": "$id", "count": {"$sum": 1}}},
         {"$sort":   {"count": -1}},
         {"$limit":  10},
     ]
@@ -387,14 +335,14 @@ async def top_grabbers(update: Update, context: CallbackContext) -> None:
         for idx, row in enumerate(top_users, start=1):
             uid = row["_id"]
             cnt = row["count"]
-            first_name = row.get("first_name") or "User"
-            last_name = row.get("last_name") or ""
-            full_name = f"{first_name} {last_name}".strip()
-            if not full_name:
-                full_name = f"User {uid}"
             medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(idx, "🏅")
+            try:
+                tg_user = await context.bot.get_chat(uid)
+                name    = tg_user.full_name or f"User {uid}"
+            except Exception:
+                name = f"User {uid}"
             lines.append(
-                f"{medal} <b><a href='tg://user?id={uid}'>{full_name}</a></b> ×{cnt}"
+                f"{medal} <b><a href='tg://user?id={uid}'>{name}</a></b> ×{cnt}"
             )
         leaderboard = "\n".join(lines)
 
@@ -430,7 +378,7 @@ async def back_to_details(update: Update, context: CallbackContext) -> None:
     """
     Button: "Back to details"
     Re-sends the character's media (video or photo) by editing the message.
-    Handles all video character variations correctly.
+    Handles both "⚜️ Animated" and "🧬 Animation" rarity labels correctly.
     """
     query   = update.callback_query
     await query.answer("🌀 Loading...", cache_time=2)
@@ -455,16 +403,8 @@ async def back_to_details(update: Update, context: CallbackContext) -> None:
 
     tmp_path = None
     try:
-        media_url = (video_url or img_url) if animated else (img_url or video_url)
-        if not media_url:
-            await query.answer("⚠️ No media available for this character.", show_alert=True)
-            return
-
-        if animated:
-            ext = ".mp4"
-            if ".gif" in media_url.lower():
-                ext = ".gif"
-            tmp_path = await _download_to_temp(media_url, ext)
+        if animated and video_url:
+            tmp_path = await _download_to_temp(video_url, ".mp4")
             with open(tmp_path, "rb") as fh:
                 await query.edit_message_media(
                     media=InputMediaVideo(
@@ -473,16 +413,10 @@ async def back_to_details(update: Update, context: CallbackContext) -> None:
                         parse_mode="HTML",
                     ),
                     reply_markup=keyboard,
-                    write_timeout=120,
-                    read_timeout=120,
                 )
-        else:
-            ext = ".jpg"
-            if ".png" in media_url.lower():
-                ext = ".png"
-            elif ".gif" in media_url.lower():
-                ext = ".gif"
-            tmp_path = await _download_to_temp(media_url, ext)
+
+        elif img_url:
+            tmp_path = await _download_to_temp(img_url, ".jpg")
             with open(tmp_path, "rb") as fh:
                 await query.edit_message_media(
                     media=InputMediaPhoto(
@@ -491,9 +425,12 @@ async def back_to_details(update: Update, context: CallbackContext) -> None:
                         parse_mode="HTML",
                     ),
                     reply_markup=keyboard,
-                    write_timeout=120,
-                    read_timeout=120,
                 )
+
+        else:
+            await query.answer(
+                "⚠️ No media available for this character.", show_alert=True
+            )
 
     except Exception as exc:
         print(f"❌ back_to_details error  char_id={char_id!r}: {exc}")

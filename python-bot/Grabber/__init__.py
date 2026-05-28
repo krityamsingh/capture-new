@@ -1,6 +1,3 @@
-import aiohttp
-import tempfile
-import os
 from pyrogram import Client as PyrogramClient
 from telegram.ext import Application
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -11,25 +8,6 @@ from datetime import datetime
 bot_start_time = datetime.now()
 
 
-async def _download_url_to_temp(url: str, suffix: str) -> str:
-    async with aiohttp.ClientSession() as session:
-        async with session.get(
-            url,
-            timeout=aiohttp.ClientTimeout(total=60),
-            headers={"User-Agent": "Mozilla/5.0"},
-        ) as resp:
-            if resp.status != 200:
-                raise RuntimeError(f"HTTP {resp.status} fetching {url}")
-            data = await resp.read()
-
-    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-    try:
-        tmp.write(data)
-    finally:
-        tmp.close()
-    return tmp.name
-
-
 class Client(PyrogramClient):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -37,113 +15,6 @@ class Client(PyrogramClient):
     async def resolve_peer(self, id):
         obj = ResolvePeer(self)
         return await obj.resolve_peer(id)
-
-    async def send_photo(self, chat_id, photo, *args, **kwargs):
-        if isinstance(photo, str) and photo.startswith(("http://", "https://")):
-            tmp_path = None
-            try:
-                ext = ".jpg"
-                if ".png" in photo.lower():
-                    ext = ".png"
-                elif ".gif" in photo.lower():
-                    ext = ".gif"
-                tmp_path = await _download_url_to_temp(photo, ext)
-                with open(tmp_path, "rb") as fh:
-                    return await super().send_photo(chat_id, fh, *args, **kwargs)
-            except Exception as e:
-                print(f"[Client.send_photo] URL download failed ({photo}): {e}")
-                return await super().send_photo(chat_id, photo, *args, **kwargs)
-            finally:
-                if tmp_path and os.path.exists(tmp_path):
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
-        else:
-            return await super().send_photo(chat_id, photo, *args, **kwargs)
-
-    async def send_video(self, chat_id, video, *args, **kwargs):
-        if isinstance(video, str) and video.startswith(("http://", "https://")):
-            tmp_path = None
-            try:
-                ext = ".mp4"
-                if ".webm" in video.lower():
-                    ext = ".webm"
-                tmp_path = await _download_url_to_temp(video, ext)
-                with open(tmp_path, "rb") as fh:
-                    return await super().send_video(chat_id, fh, *args, **kwargs)
-            except Exception as e:
-                print(f"[Client.send_video] URL download failed ({video}): {e}")
-                return await super().send_video(chat_id, video, *args, **kwargs)
-            finally:
-                if tmp_path and os.path.exists(tmp_path):
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
-        else:
-            return await super().send_video(chat_id, video, *args, **kwargs)
-
-    async def send_animation(self, chat_id, animation, *args, **kwargs):
-        if isinstance(animation, str) and animation.startswith(("http://", "https://")):
-            tmp_path = None
-            try:
-                ext = ".gif"
-                if ".mp4" in animation.lower():
-                    ext = ".mp4"
-                tmp_path = await _download_url_to_temp(animation, ext)
-                with open(tmp_path, "rb") as fh:
-                    return await super().send_animation(chat_id, fh, *args, **kwargs)
-            except Exception as e:
-                print(f"[Client.send_animation] URL download failed ({animation}): {e}")
-                return await super().send_animation(chat_id, animation, *args, **kwargs)
-            finally:
-                if tmp_path and os.path.exists(tmp_path):
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
-        else:
-            return await super().send_animation(chat_id, animation, *args, **kwargs)
-
-    async def edit_message_media(self, chat_id, message_id, media, *args, **kwargs):
-        from pyrogram.types import InputMediaVideo, InputMediaPhoto
-        
-        target_url = None
-        if hasattr(media, "media") and isinstance(media.media, str) and media.media.startswith(("http://", "https://")):
-            target_url = media.media
-            
-        if target_url:
-            tmp_path = None
-            try:
-                ext = ".jpg"
-                if isinstance(media, InputMediaVideo):
-                    ext = ".mp4"
-                elif isinstance(media, InputMediaPhoto):
-                    if ".png" in target_url.lower():
-                        ext = ".png"
-                    elif ".gif" in target_url.lower():
-                        ext = ".gif"
-                
-                tmp_path = await _download_url_to_temp(target_url, ext)
-                fh = open(tmp_path, "rb")
-                media.media = fh
-                try:
-                    return await super().edit_message_media(chat_id, message_id, media, *args, **kwargs)
-                finally:
-                    fh.close()
-            except Exception as e:
-                print(f"[Client.edit_message_media] URL download failed ({target_url}): {e}")
-                media.media = target_url
-                return await super().edit_message_media(chat_id, message_id, media, *args, **kwargs)
-            finally:
-                if tmp_path and os.path.exists(tmp_path):
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
-        else:
-            return await super().edit_message_media(chat_id, message_id, media, *args, **kwargs)
 
 
 # --- Clients are built lazily inside main() to share one event loop ---

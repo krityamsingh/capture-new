@@ -7,12 +7,12 @@ const SECRET = process.env.NEXT_PUBLIC_ADREWARD_SECRET || 'change_this_secret_ke
 // Weighted rarity selector
 function rollRarity() {
   const roll = Math.random() * 100
-  if (roll < 45) return { display: '🔴 Common', query: 'Common' }
-  if (roll < 70) return { display: '🔵 Uncommon', query: 'Uncommon' }
-  if (roll < 85) return { display: '🟠 Rare', query: 'Rare' }
-  if (roll < 93) return { display: '🟡 Legendary', query: 'Legendary' }
-  if (roll < 97) return { display: '🫧 Premium', query: 'Premium' }
-  if (roll < 99) return { display: '🔮 Limited Edition', query: 'Limited' }
+  if (roll < 22.5) return { display: '🔴 Common', query: 'Common' }
+  if (roll < 35.0) return { display: '🔵 Uncommon', query: 'Uncommon' }
+  if (roll < 42.5) return { display: '🟠 Rare', query: 'Rare' }
+  if (roll < 46.5) return { display: '🟡 Legendary', query: 'Legendary' }
+  if (roll < 48.5) return { display: '🫧 Premium', query: 'Premium' }
+  if (roll < 50.0) return { display: '🔮 Limited Edition', query: 'Limited' }
   return { display: '⚜️ Animated', query: 'Animated' }
 }
 

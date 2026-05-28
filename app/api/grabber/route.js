@@ -37,7 +37,7 @@ export async function GET(req) {
 }
 
 export async function POST(req) {
-  const BOT_TOKEN = process.env.BOT_TOKEN || '8552100143:AAGMjxMfkvoXGTe-PHeRAPYGy-RvHonm7vk';
+  const BOT_TOKEN = process.env.BOT_TOKEN || '7686672468:AAFhqx5FomKltXmGGv-5K056v9jQx1psLe4';
   const host = req.headers.get('host') || 'localhost';
 
   let update;

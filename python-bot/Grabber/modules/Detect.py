@@ -108,37 +108,10 @@ def _is_animated(character: dict) -> bool:
     Checks both known rarity strings AND the presence of video_url,
     so inconsistent DB entries are handled gracefully.
     """
-    rarity = character.get("rarity", "")
-    video_url = character.get("video_url", "")
-    img_url = character.get("img_url", "")
-    img_type = character.get("img_type", "")
-    file_extension = character.get("file_extension", "")
-    
-    # 1. Check if rarity implies animation/video
-    rarity_lower = rarity.lower() if rarity else ""
-    if "animated" in rarity_lower or "animation" in rarity_lower:
-        return True
-        
-    # 2. Check if img_type is video
-    if img_type == "video":
-        return True
-        
-    # 3. Check if video_url is set and not empty
-    if video_url:
-        return True
-        
-    # 4. Check if the URL ends with a video extension
-    for url in (video_url, img_url):
-        if url:
-            url_lower = url.lower()
-            if any(url_lower.endswith(ext) for ext in [".mp4", ".gif", ".gifv", ".webm"]):
-                return True
-                
-    # 5. Check if file_extension is a video extension
-    if file_extension and file_extension.lower() in [".mp4", ".gif", ".gifv", ".webm"]:
-        return True
-        
-    return False
+    return (
+        character.get("rarity", "") in ANIMATION_RARITIES
+        or bool(character.get("video_url", ""))
+    )
 
 
 def _build_caption(character: dict, index: int, total: int) -> str:
@@ -213,20 +186,8 @@ async def _reply_new(message: Message, character: dict, caption: str,
     tmp_path  = None
 
     try:
-        media_url = (video_url or img_url) if animated else (img_url or video_url)
-        if not media_url:
-            await message.reply_text(
-                f"⚠️ No media available.\n\n{caption}",
-                parse_mode="html",
-                reply_markup=keyboard,
-            )
-            return
-
-        if animated:
-            ext = ".mp4"
-            if ".gif" in media_url.lower():
-                ext = ".gif"
-            tmp_path = await _download_to_temp(media_url, ext)
+        if animated and video_url:
+            tmp_path = await _download_to_temp(video_url, ".mp4")
             with open(tmp_path, "rb") as fh:
                 await message.reply_video(
                     video=fh,
@@ -235,13 +196,9 @@ async def _reply_new(message: Message, character: dict, caption: str,
                     reply_markup=keyboard,
                 )
             return
-        else:
-            ext = ".jpg"
-            if ".png" in media_url.lower():
-                ext = ".png"
-            elif ".gif" in media_url.lower():
-                ext = ".gif"
-            tmp_path = await _download_to_temp(media_url, ext)
+
+        if img_url:
+            tmp_path = await _download_to_temp(img_url, ".jpg")
             with open(tmp_path, "rb") as fh:
                 await message.reply_photo(
                     photo=fh,
@@ -251,10 +208,9 @@ async def _reply_new(message: Message, character: dict, caption: str,
                 )
             return
 
-    except Exception as e:
-        print(f"[Detect._reply_new] Error: {e}")
+        # No media at all
         await message.reply_text(
-            f"❌ Failed to load media. Showing details:\n\n{caption}",
+            f"⚠️ No media available.\n\n{caption}",
             parse_mode="html",
             reply_markup=keyboard,
         )
@@ -276,33 +232,17 @@ async def _edit_existing(bot_message: Message, character: dict, caption: str,
     tmp_path  = None
 
     try:
-        media_url = (video_url or img_url) if animated else (img_url or video_url)
-        if not media_url:
-            await bot_message.edit_caption(
-                caption=f"⚠️ No media available.\n\n{caption}",
-                parse_mode="html",
-                reply_markup=keyboard,
-            )
-            return
-
-        if animated:
-            ext = ".mp4"
-            if ".gif" in media_url.lower():
-                ext = ".gif"
-            tmp_path = await _download_to_temp(media_url, ext)
+        if animated and video_url:
+            tmp_path = await _download_to_temp(video_url, ".mp4")
             with open(tmp_path, "rb") as fh:
                 await bot_message.edit_media(
                     media=InputMediaVideo(media=fh, caption=caption, parse_mode="html"),
                     reply_markup=keyboard,
                 )
             return
-        else:
-            ext = ".jpg"
-            if ".png" in media_url.lower():
-                ext = ".png"
-            elif ".gif" in media_url.lower():
-                ext = ".gif"
-            tmp_path = await _download_to_temp(media_url, ext)
+
+        if img_url:
+            tmp_path = await _download_to_temp(img_url, ".jpg")
             with open(tmp_path, "rb") as fh:
                 await bot_message.edit_media(
                     media=InputMediaPhoto(media=fh, caption=caption, parse_mode="html"),
@@ -310,16 +250,12 @@ async def _edit_existing(bot_message: Message, character: dict, caption: str,
                 )
             return
 
-    except Exception as e:
-        print(f"[Detect._edit_existing] Error: {e}")
-        try:
-            await bot_message.edit_caption(
-                caption=f"❌ Failed to load media.\n\n{caption}",
-                parse_mode="html",
-                reply_markup=keyboard,
-            )
-        except Exception as edit_exc:
-            print(f"[Detect._edit_existing] Double fallback error: {edit_exc}")
+        # No media — at least update the caption
+        await bot_message.edit_caption(
+            caption=f"⚠️ No media available.\n\n{caption}",
+            parse_mode="html",
+            reply_markup=keyboard,
+        )
 
     finally:
         _safe_delete(tmp_path)

@@ -95,18 +95,11 @@ async def show_top10_seizers(client: Client, query: CallbackQuery):
         await query.answer("Waifu not found!", show_alert=True)
         return
 
-    waifu_id_str = str(waifu_id)
     # Aggregate top 10 users by number of copies owned
     pipeline = [
-        {"$match": {"$or": [{"characters.id": waifu_id}, {"characters.id": waifu_id_str}]}},
-        {"$unwind": "$characters"},
-        {"$match": {"$or": [{"characters.id": waifu_id}, {"characters.id": waifu_id_str}]}},
-        {"$group": {
-            "_id": "$id",
-            "count": {"$sum": 1},
-            "first_name": {"$first": "$first_name"},
-            "last_name": {"$first": "$last_name"}
-        }},
+        {"$unwind": "$waifus"},
+        {"$match": {"waifus.id": waifu_id}},
+        {"$group": {"_id": "$user_id", "count": {"$sum": 1}}},
         {"$sort": {"count": -1}},
         {"$limit": 10}
     ]
@@ -117,13 +110,12 @@ async def show_top10_seizers(client: Client, query: CallbackQuery):
     async for user_data in cursor:
         user_id = user_data["_id"]
         count = user_data["count"]
-        first_name = user_data.get("first_name") or "User"
-        last_name = user_data.get("last_name") or ""
-        full_name = f"{first_name} {last_name}".strip()
-        if not full_name:
-            full_name = f"User {user_id}"
-        mention = f"[{full_name}](tg://user?id={user_id})"
-        text += f"{rank}. {mention} — `{count}` owned\n"
+        try:
+            user = await client.get_users(user_id)
+            text += f"{rank}. {user.mention} — `{count}` owned\n"
+        except Exception:
+            # Skip if user cannot be fetched (deleted account, etc.)
+            text += f"{rank}. `{user_id}` — `{count}` owned\n"
         rank += 1
 
     if rank == 1:
@@ -140,14 +132,15 @@ async def show_user_count(client: Client, query: CallbackQuery):
     waifu_id = int(query.matches[0].group(1))
     user_id = query.from_user.id
 
-    user_data = await user_collection.find_one({"$or": [{"id": user_id}, {"id": str(user_id)}]})
-    count = 0
-    if user_data:
-        characters_list = user_data.get("characters") or user_data.get("waifus") or []
-        count = sum(
-            1 for c in characters_list
-            if str(c.get("id", "")) == str(waifu_id)
-        )
+    # Aggregate to sum the number of copies of this waifu the user has
+    pipeline = [
+        {"$match": {"user_id": user_id}},
+        {"$unwind": "$waifus"},
+        {"$match": {"waifus.id": waifu_id}},
+        {"$count": "total"}
+    ]
+    result = await user_collection.aggregate(pipeline).to_list(1)
+    count = result[0]["total"] if result else 0
 
     await query.answer()
     await query.message.reply_text(

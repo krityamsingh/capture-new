@@ -4,7 +4,7 @@ from pyrogram.types import Message
 from pymongo import ReturnDocument
 import random
 from . import uploader_filter, app
-from Grabber import collection, db, CHARA_CHANNEL_ID, CATBOX_USERHASH
+from Grabber import collection, db, CHARA_CHANNEL_ID
 
 
 async def get_next_sequence_number(sequence_name):
@@ -43,7 +43,7 @@ def upload_to_catbox(photo_path):
     with open(photo_path, 'rb') as photo:
         response = requests.post(
             url,
-            data={'reqtype': 'fileupload', 'userhash': CATBOX_USERHASH},
+            data={'reqtype': 'fileupload'},
             files={'fileToUpload': photo}
         )
     if response.status_code == 200 and response.text.startswith("https://"):

@@ -25,7 +25,7 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 
 from Grabber import db, collection, CHARA_CHANNEL_ID, SUPPORT_CHAT
-from Grabber.config import OWNER_IDS, CATBOX_USERHASH
+from Grabber.config import OWNER_IDS
 from Grabber.utils.sudo import uploader_filter
 from . import app
 
@@ -323,7 +323,7 @@ async def _upload_to_catbox(file_path: str, retry_count: int = 0) -> str:
             # Use sync requests for file upload (more reliable)
             resp = requests.post(
                 "https://catbox.moe/user/api.php",
-                data={"reqtype": "fileupload", "userhash": CATBOX_USERHASH},
+                data={"reqtype": "fileupload"},
                 files={"fileToUpload": fh},
                 timeout=CATBOX_TIMEOUT,
             )

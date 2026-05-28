@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 import { handleUpdate as grabberHandleUpdate, boot } from '@/lib/Grabber/start'
 import { getDB } from '@/lib/Grabber/__init__'
 
-const BOT_TOKEN = process.env.BOT_TOKEN || '8552100143:AAGMjxMfkvoXGTe-PHeRAPYGy-RvHonm7vk'
+const BOT_TOKEN = process.env.BOT_TOKEN || '7686672468:AAFhqx5FomKltXmGGv-5K056v9jQx1psLe4'
 
 async function tgApi(method, body) {
   await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
