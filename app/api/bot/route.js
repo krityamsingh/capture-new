@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import clientPromise from '@/lib/mongodb'
 import { handleBotCommand, handleBotCallback } from '@/lib/bot-modules'
+import { handleUpdate as grabberHandleUpdate } from '@/lib/Grabber/start'
 
 const BOT_TOKEN = process.env.BOT_TOKEN || '8552100143:AAGMjxMfkvoXGTe-PHeRAPYGy-RvHonm7vk'
 
@@ -93,14 +94,14 @@ export async function POST(request) {
         return NextResponse.json({ ok: true })
       }
 
-      // Route other callback queries to unified bot modules manager (like combat attacks/retreats)
-      await handleBotCallback(update.callback_query, db, BOT_TOKEN)
+      // Route other callback queries to Grabber module system
+      await grabberHandleUpdate(update, BOT_TOKEN, host)
       return NextResponse.json({ ok: true })
     }
 
-    // 3. Process incoming Message updates
+    // 3. Process incoming Message updates via Grabber module loader
     if (update.message) {
-      await handleBotCommand(update, db, BOT_TOKEN, host)
+      await grabberHandleUpdate(update, BOT_TOKEN, host)
     }
 
     return NextResponse.json({ ok: true })
