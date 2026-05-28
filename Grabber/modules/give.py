@@ -902,3 +902,75 @@ async def give_animated_characters(client, message):
         except:
             await message.reply(error_msg)
         await log_action("AANI_COMMAND_ERROR", f"Error: {str(e)}")
+
+@app.on_message(filters.command(["givegold"]) & sudo_filter)
+async def give_gold_command(client, message):
+    """Sudo command to give gold to a user by replying or specifying user ID"""
+    try:
+        # Check if reply or arguments are used
+        if message.reply_to_message:
+            # Usage: /givegold <amount>
+            try:
+                amount = int(message.command[1]) if len(message.command) > 1 else 0
+            except ValueError:
+                return await message.reply("⚠️ Invalid amount format.\nUsage: `/givegold <amount>` (replying to a user)")
+
+            receiver_id = message.reply_to_message.from_user.id
+            receiver = message.reply_to_message.from_user
+        else:
+            # Usage: /givegold <user_id> <amount>
+            if len(message.command) < 3:
+                return await message.reply(
+                    "⚠️ Please reply to the target user or specify user ID.\n"
+                    "Usage:\n"
+                    "• `/givegold <amount>` (replying to a user)\n"
+                    "• `/givegold <user_id> <amount>`"
+                )
+
+            try:
+                receiver_id = int(message.command[1])
+                amount = int(message.command[2])
+            except ValueError:
+                return await message.reply("⚠️ Invalid user ID or amount format.\nUsage: `/givegold <user_id> <amount>`")
+
+            try:
+                receiver = await client.get_users(receiver_id)
+            except Exception:
+                receiver = None
+
+        if amount <= 0:
+            return await message.reply("⚠️ Amount must be positive!")
+
+        # Update user's gold balance in the database
+        await user_collection.update_one(
+            {'id': receiver_id},
+            {'$inc': {'gold': amount}},
+            upsert=True
+        )
+
+        recipient_name = f"[{receiver.first_name}](tg://user?id={receiver.id})" if receiver else f"`{receiver_id}`"
+        response_msg = f"""
+💰 **Gold Transferred Successfully!**
+
+• **Recipient:** {recipient_name}
+• **Amount Given:** `{amount:,}` ₲
+
+_Action performed by admin: {message.from_user.mention}_
+"""
+        await message.reply(response_msg, disable_web_page_preview=True)
+
+        # Log the action
+        giver_name = f"[{message.from_user.first_name}](tg://user?id={message.from_user.id})"
+        log_details = f"""
+💰 **Gold Transfer Log**
+• **Giver:** {giver_name}
+• **Receiver:** {recipient_name} (`{receiver_id}`)
+• **Amount:** `{amount:,}` ₲
+"""
+        await log_action("GOLD_GIVEN", log_details)
+
+    except Exception as e:
+        error_msg = f"⚠️ **System Error**\n\n`{type(e).__name__}: {str(e)}`"
+        await message.reply(error_msg)
+        await log_action("GIVEGOLD_ERROR", f"Error in /givegold:\n\n{error_msg}")
+
