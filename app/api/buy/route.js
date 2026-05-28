@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import clientPromise from '@/lib/mongodb'
-import { normalizeRarity, RARITY_PRICES } from '../shop/route'
+import { normalizeRarity, RARITY_PRICES } from '@/lib/shop-helpers'
 
 const SECRET = process.env.NEXT_PUBLIC_ADREWARD_SECRET || 'change_this_secret_key_abc123'
 
