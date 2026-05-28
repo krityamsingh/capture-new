@@ -167,39 +167,51 @@ async def _send_character_media(
     try:
         # ── Video path ─────────────────────────────────────────────────────────
         if animated and video_url:
-            tmp_path = await _download_to_temp(video_url, ".mp4")
-            with open(tmp_path, "rb") as fh:
-                await reply_fn(
-                    "video",
-                    media=fh,
-                    caption=caption,
-                    parse_mode="HTML",
-                    reply_markup=keyboard,
-                )
-            return
+            try:
+                tmp_path = await _download_to_temp(video_url, ".mp4")
+                with open(tmp_path, "rb") as fh:
+                    await reply_fn(
+                        "video",
+                        media=fh,
+                        caption=caption,
+                        parse_mode="HTML",
+                        reply_markup=keyboard,
+                    )
+                return
+            except Exception as e:
+                print(f"⚠️ Failed to download/send video for character {character.get('id')}: {e}")
 
         # ── Photo path ─────────────────────────────────────────────────────────
         if img_url:
-            tmp_path = await _download_to_temp(img_url, ".jpg")
-            with open(tmp_path, "rb") as fh:
-                await reply_fn(
-                    "photo",
-                    media=fh,
-                    caption=caption,
-                    parse_mode="HTML",
-                    reply_markup=keyboard,
-                )
-            return
-
-        # ── No media at all ────────────────────────────────────────────────────
-        await fallback_reply_fn(
-            capsify("No media found for this character.") + f"\n\n{caption}",
-            parse_mode="HTML",
-            reply_markup=keyboard,
-        )
+            try:
+                tmp_path = await _download_to_temp(img_url, ".jpg")
+                with open(tmp_path, "rb") as fh:
+                    await reply_fn(
+                        "photo",
+                        media=fh,
+                        caption=caption,
+                        parse_mode="HTML",
+                        reply_markup=keyboard,
+                    )
+                return
+            except Exception as e:
+                print(f"⚠️ Failed to download/send photo for character {character.get('id')}: {e}")
 
     finally:
         _safe_delete(tmp_path)
+
+    # ── Fallback ───────────────────────────────────────────────────────────
+    fallback_text = caption
+    if video_url:
+        fallback_text += f"\n\n🎬 <a href='{video_url}'>Video Link</a>"
+    elif img_url:
+        fallback_text += f"\n\n🖼 <a href='{img_url}'>Image Link</a>"
+
+    await fallback_reply_fn(
+        fallback_text,
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -1,3 +1,4 @@
+from . import patch
 from pyrogram import Client as PyrogramClient
 from telegram.ext import Application
 from motor.motor_asyncio import AsyncIOMotorClient
