@@ -157,8 +157,11 @@ export async function POST(request) {
     const username = from?.username || 'user'
     const firstName = from?.first_name || 'Collector'
 
-    // Determine the absolute WebApp domain URL dynamically from request headers
-    const host = request.headers.get('x-forwarded-host') || request.headers.get('host') || 'captrue-upgraded.vercel.app'
+    // Determine the absolute WebApp domain URL dynamically, handling comma-separated proxy hosts cleanly
+    let host = request.headers.get('x-forwarded-host') || request.headers.get('host') || 'captrue-upgraded.vercel.app'
+    if (host.includes(',')) {
+      host = host.split(',')[0].trim()
+    }
     const protocol = host.includes('localhost') ? 'http' : 'https'
     const webAppUrl = `${protocol}://${host}`
 
