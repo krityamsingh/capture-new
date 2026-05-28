@@ -17,8 +17,10 @@ async def git_pull(client, message: Message):
     await message.reply("`⏳ Pulling updates from the repo... please wait.`")
 
     try:
+        github_token = os.environ.get("GITHUB_TOKEN", "")
+        pull_url = f"https://{github_token}@github.com/Og-peter/Chut" if github_token else "https://github.com/Og-peter/Chut"
         result = subprocess.run(
-            ["git", "pull", "https://GITHUB_TOKEN_PLACEHOLDER@github.com/Og-peter/Chut", "main"],
+            ["git", "pull", pull_url, "main"],
             capture_output=True, text=True, check=True, timeout=60
         )
 

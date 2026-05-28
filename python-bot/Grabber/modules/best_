@@ -7,7 +7,7 @@ from . import application
 
 # 🔹 GitHub Credentials
 GITHUB_USERNAME = "https://github.com/Og-peter/seizee"
-GITHUB_TOKEN = "GITHUB_TOKEN_PLACEHOLDER"
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 REPO_NAME = "seizee"
 
 # 🔹 Git Authentication Fix (Set Proper URL)
