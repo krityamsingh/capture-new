@@ -1,4 +1,6 @@
 import os
+from dotenv import load_dotenv
+load_dotenv()
 
 OWNER_IDS = [6228788487, 8496760733, 7878477646, 7976292835, 6118760915]
 owner_id  = "6118760915"
