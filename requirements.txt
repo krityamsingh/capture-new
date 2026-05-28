@@ -1,6 +1,6 @@
 motor<3.6
 aiohttp==3.11.17
-python-telegram-bot==20.6
+python-telegram-bot>=21.0
 pymongo<4.9
 pyrate-limiter==3.7.0
 apscheduler==3.10.1
