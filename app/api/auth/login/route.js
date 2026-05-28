@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import clientPromise from '@/lib/mongodb'
+import { getDB } from '@/lib/Grabber/__init__'
 
 export async function POST(request) {
   try {
@@ -16,12 +16,7 @@ export async function POST(request) {
       return NextResponse.json({ ok: false, message: '❌ Verification code required' }, { status: 400 })
     }
 
-    const client = await clientPromise
-    if (!client) {
-      return NextResponse.json({ ok: false, message: '❌ Database connection not available' }, { status: 500 })
-    }
-
-    const db = client.db('Character_catcher')
+    const db = await getDB()
     const userColl = db.collection('user_collection')
 
     const user = await userColl.findOne({ id: userId })

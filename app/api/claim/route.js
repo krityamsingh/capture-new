@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import clientPromise from '@/lib/mongodb'
+import { getDB } from '@/lib/Grabber/__init__'
 import { normalizeRarity } from '@/lib/shop-helpers'
 
 const SECRET = process.env.NEXT_PUBLIC_ADREWARD_SECRET || 'change_this_secret_key_abc123'
@@ -30,11 +30,7 @@ export async function POST(request) {
       return NextResponse.json({ ok: false, message: '❌ Invalid User ID' }, { status: 400 })
     }
 
-    const client = await clientPromise
-    if (!client) {
-      return NextResponse.json({ ok: false, message: '❌ Database connection configuration missing' }, { status: 500 })
-    }
-    const db = client.db('Character_catcher')
+    const db = await getDB()
     const userColl = db.collection('user_collection')
     const charColl = db.collection('anime_characters')
 

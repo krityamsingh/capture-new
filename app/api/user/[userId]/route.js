@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import clientPromise from '@/lib/mongodb'
+import { getDB } from '@/lib/Grabber/__init__'
 
 export async function GET(request, { params }) {
   try {
@@ -11,11 +11,7 @@ export async function GET(request, { params }) {
       return NextResponse.json({ error: 'Invalid User ID' }, { status: 400 })
     }
 
-    const client = await clientPromise
-    if (!client) {
-      return NextResponse.json({ error: 'Database connection configuration missing' }, { status: 500 })
-    }
-    const db = client.db('Character_catcher')
+    const db = await getDB()
     const userColl = db.collection('user_collection')
 
     let user = await userColl.findOne({ id: userId })

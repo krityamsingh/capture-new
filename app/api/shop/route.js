@@ -1,16 +1,12 @@
 import { NextResponse } from 'next/server'
-import clientPromise from '@/lib/mongodb'
+import { getDB } from '@/lib/Grabber/__init__'
 import { normalizeRarity, RARITY_PRICES } from '@/lib/shop-helpers'
 
 
 
 export async function GET() {
   try {
-    const client = await clientPromise
-    if (!client) {
-      return NextResponse.json({ error: 'Database connection configuration missing' }, { status: 500 })
-    }
-    const db = client.db('Character_catcher')
+    const db = await getDB()
     const charColl = db.collection('anime_characters')
 
     // Sample 12 random characters with images

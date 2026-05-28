@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import crypto from 'crypto'
-import clientPromise from '@/lib/mongodb'
+import { getDB } from '@/lib/Grabber/__init__'
 
 const BOT_TOKEN = process.env.BOT_TOKEN || '8552100143:AAGMjxMfkvoXGTe-PHeRAPYGy-RvHonm7vk'
 
@@ -35,12 +35,7 @@ export async function POST(request) {
       return NextResponse.json({ ok: false, message: '❌ Invalid Telegram User ID' }, { status: 400 })
     }
 
-    const client = await clientPromise
-    if (!client) {
-      return NextResponse.json({ ok: false, message: '❌ Database connection not available' }, { status: 500 })
-    }
-
-    const db = client.db('Character_catcher')
+    const db = await getDB()
     const userColl = db.collection('user_collection')
 
     // Find the user first
