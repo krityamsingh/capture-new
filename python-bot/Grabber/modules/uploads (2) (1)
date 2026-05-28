@@ -1,0 +1,643 @@
+from pyrogram import Client, filters
+from pyrogram.types import (
+    InlineKeyboardButton, InlineKeyboardMarkup,
+    Message, ReplyKeyboardMarkup, KeyboardButton, CallbackQuery
+)
+from pymongo import ReturnDocument
+from Grabber import collection, db, CHARA_CHANNEL_ID, SUPPORT_CHAT, user_collection
+from . import uploader_filter, app
+
+
+# ✅ Always reads real max ID from DB — never resets to 1
+async def get_next_sequence_number(sequence_name):
+    sequence_collection = db.sequences
+    all_chars = await collection.find({"id": {"$exists": True}}, {"id": 1}).to_list(None)
+    existing_ids = []
+    for c in all_chars:
+        try:
+            existing_ids.append(int(c["id"]))
+        except (ValueError, TypeError):
+            pass
+    db_max = max(existing_ids) if existing_ids else 0
+    seq_doc = await sequence_collection.find_one({'_id': sequence_name})
+    seq_val = seq_doc['sequence_value'] if seq_doc else 0
+    next_value = max(db_max, seq_val) + 1
+    await sequence_collection.update_one(
+        {'_id': sequence_name},
+        {'$set': {'sequence_value': next_value}},
+        upsert=True
+    )
+    return next_value
+
+
+# Rarity emojis mapping
+rarity_emojis = {
+    '🔴 Common': '🔴',
+    '🔮 Limited Edition': '🔮',
+    '🫧 Premium': '🫧',
+    '🟡 Legendary': '🟡',
+    '⚪ Epic': '⚪',
+    '🟠 Rare': '🟠',
+    '🔵 Uncommon': '🔵',
+    '🏵️ Exotic': '🏵️',
+    '🌼 Celebrity': '🌼',
+    '🎐 Crystal': '🎐',
+    '🍹 Neon': '🍹',
+    '🧿 Supreme': '🧿',
+    '⚡ Thundra': '⚡',
+    '🛸 Galvoria': '🛸',
+    '🔮 Arcane Verse': '🔮',
+    '🫧 Aether Verse': '🫧',
+    '🟡 Solar Verse': '🟡'
+}
+
+# Short rarity keys to avoid callback_data byte limit (Telegram max = 64 bytes)
+rarity_short_keys = {
+    '🔴 Common': 'r1',
+    '🔮 Limited Edition': 'r2',
+    '🫧 Premium': 'r3',
+    '🟡 Legendary': 'r4',
+    '⚪ Epic': 'r5',
+    '🟠 Rare': 'r6',
+    '🔵 Uncommon': 'r7',
+    '🏵️ Exotic': 'r8',
+    '🌼 Celebrity': 'r9',
+    '🎐 Crystal': 'r10',
+    '🍹 Neon': 'r11',
+    '🧿 Supreme': 'r12',
+    '⚡ Thundra': 'r13',
+    '🛸 Galvoria': 'r14',
+    '🔮 Arcane Verse': 'r15',
+    '🫧 Aether Verse': 'r16',
+    '🟡 Solar Verse': 'r17'
+}
+# Reverse map: short key → full rarity name
+rarity_key_to_name = {v: k for k, v in rarity_short_keys.items()}
+
+# Event emojis mapping (using short keys to stay under 64 byte limit)
+event_emojis = {
+    '💉 𝑵𝒖𝒓𝒔𝒆': 'e1',
+    '🐰 𝑩𝒖𝒏𝒏𝒚': 'e2',
+    '🧹 𝑴𝒂𝒊𝒅': 'e3',
+    '🎃 𝑯𝒂𝒍𝒍𝒐𝒘𝒆𝒆𝒏': 'e4',
+    '🎄 𝑪𝒉𝒓𝒊𝒔𝒕𝒎𝒂𝒔': 'e5',
+    '🎩 𝑻𝒖𝒙𝒆𝒅𝒐': 'e6',
+    '☃️ 𝑾𝒊𝒏𝒕𝒆𝒓': 'e7',
+    '👘 𝑲𝒊𝒎𝒐𝒏𝒐': 'e8',
+    '🎒 𝑺𝒄𝒉𝒐𝒐𝒍': 'e9',
+    '🥻 𝑺𝒂𝒓𝒆𝒆': 'e10',
+    '🏖 𝑺𝒖𝒎𝒎𝒆𝒓': 'e11',
+    '🏀 𝑩𝒂𝒔𝒌𝒆𝒕𝒃𝒂𝒍𝒍': 'e12',
+    '⚽ 𝑭𝒐𝒐𝒕𝒃𝒂𝒍𝒍': 'e13',
+    '🏜️ 𝑬𝒈𝒚𝒑𝒕': 'e14',
+    '💞 𝑽𝒂𝒍𝒆𝒏𝒕𝒊𝒏𝒆': 'e15',
+    '👥 𝐃𝐮𝐨': 'e16',
+    '🤝 𝐆𝐫𝐨𝐮𝐩': 'e17',
+    '🏮 𝑪𝒉𝒊𝒏𝒆𝒔𝒆': 'e18',
+    '📙 𝑴𝒂𝒏𝒉𝒘𝒂': 'e19',
+    '👙 𝑩𝒊𝒌𝒊𝒏𝒊': 'e20',
+    '🎊 𝑪𝒉𝒆𝒆𝒓𝒍𝒆𝒂𝒅𝒆𝒓𝒔': 'e21',
+    '🎮 𝑮𝒂𝒎𝒆': 'e22',
+    '💍 𝑴𝒂𝒓𝒓𝒊𝒆𝒅': 'e23',
+    '👶 𝑪𝒉𝒊𝒃𝒊': 'e24',
+    '🕷️ 𝑺𝒑𝒊𝒅𝒆𝒓': 'e25',
+    '🔞 𝑵𝒖𝒅𝒆𝒔': 'e26',
+    '🎗️ 𝑪𝒐𝒍𝒍𝒆𝒄𝒕𝒐𝒓': 'e27',
+    '⛩️ 𝑺𝒉𝒊𝒏𝒕𝒐': 'e28',
+    '🎆 𝑭𝒊𝒓𝒆𝒘𝒐𝒓𝒌𝒔': 'e29',
+    '⚔️ 𝑾𝒂𝒓𝒓𝒊𝒐𝒓': 'e30',
+    '⛷️ 𝑺𝒌𝒊': 'e31',
+    '🧛 𝑽𝒂𝒎𝒑𝒊𝒓𝒆': 'e32',
+    '🐉 𝑫𝒓𝒂𝒈𝒐𝒏': 'e33',
+    '🏐 𝑽𝒐𝒍𝒍𝒆𝒚𝒃𝒂𝒍𝒍': 'e34',
+}
+# Reverse map: short key → full event name
+event_key_to_name = {v: k for k, v in event_emojis.items()}
+
+
+def get_anim_event_buttons(change_mode=False):
+    buttons = []
+    row = []
+    for event_name, short_key in event_emojis.items():
+        emoji = event_name.split()[0]
+        label = event_name.split()[-1]
+        # callback: ag_ev_{short_key} or ag_evc_{short_key}
+        cb = f"ag_evc_{short_key}" if change_mode else f"ag_ev_{short_key}"
+        row.append(InlineKeyboardButton(f"{emoji} {label}", callback_data=cb))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    skip_cb = "ag_evc_skip" if change_mode else "ag_ev_skip"
+    buttons.append([
+        InlineKeyboardButton("⏭ Skip", callback_data=skip_cb),
+        InlineKeyboardButton("❌ Cancel", callback_data="ag_cancel")
+    ])
+    return InlineKeyboardMarkup(buttons)
+
+
+def get_anim_rarity_buttons():
+    buttons = []
+    row = []
+    for rarity, short_key in rarity_short_keys.items():
+        emoji = rarity_emojis[rarity]
+        label = rarity.split()[1]
+        # callback: ag_r_{short_key}  e.g. ag_r_r1
+        row.append(InlineKeyboardButton(f"{emoji} {label}", callback_data=f"ag_r_{short_key}"))
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="ag_cancel")])
+    return InlineKeyboardMarkup(buttons)
+
+
+# ─── Separate state dict so it never clashes with normal upload ───
+anim_states = {}
+
+
+# ─────────────────────────────────────────────
+# HELPER: send animation or video safely
+# ─────────────────────────────────────────────
+async def send_anim_media(chat_id, file_id, media_type, caption):
+    try:
+        if media_type == "video":
+            await app.send_video(chat_id=chat_id, video=file_id, caption=caption)
+        else:
+            await app.send_animation(chat_id=chat_id, animation=file_id, caption=caption)
+    except Exception as e:
+        print(f"send_anim_media error to {chat_id}: {e}")
+        await app.send_message(chat_id=chat_id, text=caption)
+
+
+# ─────────────────────────────────────────────
+# COMMANDS  (/aupload in bot DM)
+# ─────────────────────────────────────────────
+
+@app.on_message(filters.private & filters.command(["aupload", "animupload", "ganim"]) & uploader_filter)
+async def start_anim_upload(client: Client, message: Message):
+    await message.reply_text(
+        f"🎬 Hey {message.from_user.first_name}!\n\n"
+        "Welcome to the **Animated Waifu Panel**! 💫\n"
+        "Upload GIF or Video animated characters here.\n\n"
+        "Tap the button below 👇",
+        reply_markup=ReplyKeyboardMarkup(
+            [[KeyboardButton("🎬 Animated Panel 🎬")]],
+            resize_keyboard=True
+        ),
+    )
+
+
+@app.on_message(filters.text & filters.private & filters.regex("^🎬 Animated Panel 🎬$") & uploader_filter)
+async def anim_waifu_panel(client, message):
+    total_waifus = await collection.count_documents({"is_animated": True})
+    total_animes = len(await collection.distinct("anime"))
+    await message.reply_text(
+        f"🎬 **Animated Waifu Panel**\n\n"
+        f"🍃 Animated Characters: `{total_waifus}`\n"
+        f"⛩️ Anime Universes: `{total_animes}`\n\n"
+        "Choose an action below:",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🎬 Add Animated Waifu", callback_data="ag_start"),
+                InlineKeyboardButton("⛩️ Add Anime", callback_data="ag_add_anime")
+            ]
+        ])
+    )
+
+
+@app.on_message(filters.command("aedit") & filters.private & uploader_filter)
+async def anim_edit_cmd(client, message):
+    if len(message.command) < 2:
+        return await message.reply_text("📌 Usage: `/aedit <waifu_id>`")
+    waifu_id = message.command[1]
+    waifu = await collection.find_one({"id": waifu_id, "is_animated": True})
+    if not waifu:
+        return await message.reply_text("❌ Animated waifu not found for that ID.")
+    try:
+        await message.reply_animation(
+            animation=waifu["anim_url"],
+            caption=(
+                f"❄️ **Animated Edit Panel**\n\n"
+                f"☘️ Name: `{waifu['name']}`\n"
+                f"⛩️ Anime: `{waifu['anime']}`\n"
+                f"🍁 Rarity: `{waifu['rarity']}`\n"
+                f"🎊 Event: `{waifu.get('event') or 'None'}`"
+            ),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📝 Rename", callback_data=f"ag_ren_{waifu_id}")],
+                [InlineKeyboardButton("🎬 Update Media", callback_data=f"ag_updmedia_{waifu_id}")],
+                [InlineKeyboardButton("🍃 Change Rarity", callback_data=f"ag_chrar_{waifu_id}")],
+                [InlineKeyboardButton("🎊 Change Event", callback_data=f"ag_chrev_{waifu_id}")],
+                [InlineKeyboardButton("💀 Destroy", callback_data=f"ag_destroy_{waifu_id}"),
+                 InlineKeyboardButton("🚮 Delete", callback_data=f"ag_delete_{waifu_id}")]
+            ])
+        )
+    except Exception:
+        await message.reply_video(
+            video=waifu["anim_url"],
+            caption=f"❄️ Edit Panel\n☘️ {waifu['name']} | {waifu['rarity']}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📝 Rename", callback_data=f"ag_ren_{waifu_id}")],
+                [InlineKeyboardButton("🎬 Update Media", callback_data=f"ag_updmedia_{waifu_id}")],
+                [InlineKeyboardButton("🍃 Change Rarity", callback_data=f"ag_chrar_{waifu_id}")],
+                [InlineKeyboardButton("🎊 Change Event", callback_data=f"ag_chrev_{waifu_id}")],
+                [InlineKeyboardButton("💀 Destroy", callback_data=f"ag_destroy_{waifu_id}"),
+                 InlineKeyboardButton("🚮 Delete", callback_data=f"ag_delete_{waifu_id}")]
+            ])
+        )
+
+
+# ─────────────────────────────────────────────
+# START UPLOAD FLOW
+# ─────────────────────────────────────────────
+
+@app.on_callback_query(filters.regex(r'^ag_start$'))
+async def ag_start(client, cq):
+    await cq.answer()
+    anim_states[cq.from_user.id] = {"state": "awaiting_anime_name"}
+    await cq.message.edit_text(
+        "🎬 **Step 1/4** — Anime Name\n\n"
+        "Type the **anime name** this character belongs to:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel", callback_data="ag_cancel")]
+        ])
+    )
+
+
+@app.on_callback_query(filters.regex(r'^ag_add_anime$'))
+async def ag_add_anime_cb(client, cq):
+    await cq.answer()
+    anim_states[cq.from_user.id] = {"state": "adding_anime"}
+    await cq.message.edit_text(
+        "📺 Type the **new anime name** to add:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel", callback_data="ag_cancel")]
+        ])
+    )
+
+
+# ─────────────────────────────────────────────
+# TEXT HANDLER — handles all anim flow steps
+# ─────────────────────────────────────────────
+
+@app.on_message(filters.private & filters.text & uploader_filter)
+async def anim_text_handler(client, message):
+    # Ignore panel button — handled by separate handler above
+    if message.text.strip() == "🎬 Animated Panel 🎬":
+        return
+
+    user_id = message.from_user.id
+    state_data = anim_states.get(user_id)
+    if not state_data:
+        return
+
+    text = message.text.strip()
+    state = state_data.get("state")
+
+    # ── Step 1: Anime name ──
+    if state == "awaiting_anime_name":
+        anim_states[user_id]["anime"] = text
+        anim_states[user_id]["state"] = "awaiting_char_name"
+        await message.reply_text(
+            f"✅ Anime: `{text}`\n\n"
+            "🎬 **Step 2/4** — Character Name\n\nType the **character name**:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancel", callback_data="ag_cancel")]
+            ])
+        )
+
+    # ── Step 2: Character name ──
+    elif state == "awaiting_char_name":
+        anim_states[user_id]["name"] = text
+        anim_states[user_id]["state"] = "awaiting_rarity"
+        await message.reply_text(
+            f"✅ Name: `{text}`\n\n"
+            "🎬 **Step 3/4** — Rarity\n\nChoose a rarity:",
+            reply_markup=get_anim_rarity_buttons()
+        )
+
+    # ── Add anime ──
+    elif state == "adding_anime":
+        existing = await collection.find_one({"anime": text})
+        if existing:
+            await message.reply_text(f"⚠️ Anime **'{text}'** already exists!")
+        else:
+            await collection.insert_one({"anime": text})
+            await message.reply_text(f"✅ **'{text}'** added to the anime list!")
+            mention = f"<a href='tg://user?id={user_id}'>{message.from_user.first_name}</a>"
+            await app.send_message(CHARA_CHANNEL_ID, f"✨ #NewAnime Added!\n📺 `{text}`\n👤 {mention}")
+            await app.send_message(SUPPORT_CHAT, f"✨ #NewAnime Added!\n📺 `{text}`\n👤 {mention}")
+        anim_states.pop(user_id, None)
+
+    # ── Rename waifu ──
+    elif state == "renaming_waifu":
+        waifu_id = state_data.get("waifu_id")
+        waifu = await collection.find_one({"id": waifu_id})
+        if waifu:
+            old_name = waifu["name"]
+            await collection.update_one({"id": waifu_id}, {"$set": {"name": text}})
+            await message.reply_text(f"✅ Renamed **{old_name}** → **{text}**!")
+            mention = f"<a href='tg://user?id={user_id}'>{message.from_user.first_name}</a>"
+            caption = f"🔔 #RENAME\n\n🔄 Old: `{old_name}`\n✨ New: `{text}`\n👤 {mention}"
+            await send_anim_media(CHARA_CHANNEL_ID, waifu["anim_url"], waifu.get("media_type", "animation"), caption)
+            await send_anim_media(SUPPORT_CHAT, waifu["anim_url"], waifu.get("media_type", "animation"), caption)
+        else:
+            await message.reply_text("❌ Waifu not found.")
+        anim_states.pop(user_id, None)
+
+    # ── Rename anime ──
+    elif state == "renaming_anime":
+        old = state_data.get("anime")
+        await collection.update_many({"anime": old}, {"$set": {"anime": text}})
+        await message.reply_text(f"✅ Renamed **'{old}'** → **'{text}'**!")
+        mention = f"<a href='tg://user?id={user_id}'>{message.from_user.first_name}</a>"
+        await app.send_message(CHARA_CHANNEL_ID, f"🔔 #RENIMEANIME\n🔄 `{old}` → `{text}`\n👤 {mention}")
+        await app.send_message(SUPPORT_CHAT, f"🔔 #RENIMEANIME\n🔄 `{old}` → `{text}`\n👤 {mention}")
+        anim_states.pop(user_id, None)
+
+
+# ─────────────────────────────────────────────
+# RARITY SELECTION
+# ─────────────────────────────────────────────
+
+@app.on_callback_query(filters.regex(r'^ag_r_'))
+async def ag_rarity_selected(client, cq):
+    await cq.answer()
+    short_key = cq.data.split("ag_r_", 1)[-1]
+    full_rarity = rarity_key_to_name.get(short_key)
+    if not full_rarity:
+        return await cq.answer("❌ Invalid rarity.", show_alert=True)
+
+    user_id = cq.from_user.id
+    if user_id not in anim_states:
+        return await cq.answer("Session expired. Start again.", show_alert=True)
+
+    anim_states[user_id]["rarity"] = full_rarity
+    anim_states[user_id]["state"] = "awaiting_event"
+    await cq.message.edit_text(
+        f"✅ Rarity: `{full_rarity}`\n\n"
+        "🎬 **Step 4/4** — Event (optional)\n\nChoose an event or skip:",
+        reply_markup=get_anim_event_buttons()
+    )
+
+
+# ─────────────────────────────────────────────
+# EVENT SELECTION
+# ─────────────────────────────────────────────
+
+@app.on_callback_query(filters.regex(r'^ag_ev_'))
+async def ag_event_selected(client, cq):
+    await cq.answer()
+    short_key = cq.data.split("ag_ev_", 1)[-1]
+    user_id = cq.from_user.id
+
+    if user_id not in anim_states:
+        return await cq.answer("Session expired. Start again.", show_alert=True)
+
+    if short_key == "skip":
+        anim_states[user_id]["event"] = None
+    else:
+        full_event = event_key_to_name.get(short_key)
+        anim_states[user_id]["event"] = full_event
+
+    anim_states[user_id]["state"] = "awaiting_media"
+    await cq.message.edit_text(
+        "✅ All details set!\n\n"
+        "🎬 Now send the **GIF or Video** for this character:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel", callback_data="ag_cancel")]
+        ])
+    )
+
+
+# ─────────────────────────────────────────────
+# RECEIVE ANIMATION / VIDEO
+# ─────────────────────────────────────────────
+
+@app.on_message(filters.private & (filters.animation | filters.video) & uploader_filter)
+async def anim_receive_media(client, message):
+    user_id = message.from_user.id
+    state_data = anim_states.get(user_id)
+    if not state_data:
+        return
+
+    if message.animation:
+        file_id = message.animation.file_id
+        media_type = "animation"
+    elif message.video:
+        file_id = message.video.file_id
+        media_type = "video"
+    else:
+        return
+
+    state = state_data.get("state")
+
+    try:
+        # ── NEW CHARACTER UPLOAD ──
+        if state == "awaiting_media":
+            char_id = str(await get_next_sequence_number('character_id'))
+            character = {
+                'anim_url': file_id,
+                'img_url': file_id,       # fallback so existing systems don't break
+                'media_type': media_type,
+                'name': state_data["name"],
+                'anime': state_data["anime"],
+                'rarity': state_data["rarity"],
+                'event': state_data.get("event"),
+                'id': char_id,
+                'is_animated': True
+            }
+            await collection.insert_one(character)
+            await message.reply_text("⏳ Uploading animated waifu...")
+
+            event_line = f"\n{state_data['event']}" if state_data.get("event") else ""
+            caption = (
+                f"OwO! Animated character!\n\n"
+                f"{state_data['anime']}\n"
+                f"{char_id}: {state_data['name']}\n"
+                f"{rarity_emojis.get(state_data['rarity'], '')} 𝙍𝘼𝙍𝙄𝙏𝙔: {state_data['rarity'].split()[-1]}"
+                f"{event_line}\n\n"
+                f"➼ ᴀᴅᴅᴇᴅ ʙʏ: [{message.from_user.first_name}](tg://user?id={user_id})"
+            )
+            await send_anim_media(CHARA_CHANNEL_ID, file_id, media_type, caption)
+            await send_anim_media(SUPPORT_CHAT, file_id, media_type, caption)
+            await message.reply_text(f"✅ Done! Animated Waifu added with ID: `{char_id}`")
+            anim_states.pop(user_id, None)
+
+        # ── UPDATE EXISTING MEDIA ──
+        elif state == "updating_media":
+            waifu_id = state_data.get("waifu_id")
+            waifu = await collection.find_one_and_update(
+                {"id": waifu_id},
+                {"$set": {"anim_url": file_id, "img_url": file_id, "media_type": media_type}},
+                return_document=ReturnDocument.AFTER
+            )
+            if waifu:
+                await message.reply_text("✅ Media updated!")
+                caption = (
+                    f"🎬 Media Updated!\n"
+                    f"👤 By: [{message.from_user.first_name}](tg://user?id={user_id})\n"
+                    f"👧 {waifu.get('name', 'Unknown')}"
+                )
+                await send_anim_media(CHARA_CHANNEL_ID, file_id, media_type, caption)
+                await send_anim_media(SUPPORT_CHAT, file_id, media_type, caption)
+            else:
+                await message.reply_text("❌ Failed to update. Waifu not found.")
+            anim_states.pop(user_id, None)
+
+    except Exception as e:
+        await message.reply_text(f"⚠️ Error: `{str(e)}`")
+        print(f"anim_receive_media error: {e}")
+        anim_states.pop(user_id, None)
+
+
+# ─────────────────────────────────────────────
+# EDIT CALLBACKS
+# ─────────────────────────────────────────────
+
+@app.on_callback_query(filters.regex(r'^ag_ren_'))
+async def ag_rename_cb(client, cq):
+    await cq.answer()
+    waifu_id = cq.data.split("ag_ren_", 1)[-1]
+    anim_states[cq.from_user.id] = {"state": "renaming_waifu", "waifu_id": waifu_id}
+    await cq.message.edit_text(
+        f"✏️ **Rename Character**\n\n🆔 ID: `{waifu_id}`\n\nType the new name:",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="ag_cancel")]])
+    )
+
+
+@app.on_callback_query(filters.regex(r'^ag_updmedia_'))
+async def ag_updmedia_cb(client, cq):
+    await cq.answer()
+    waifu_id = cq.data.split("ag_updmedia_", 1)[-1]
+    anim_states[cq.from_user.id] = {"state": "updating_media", "waifu_id": waifu_id}
+    await cq.message.edit_text(
+        f"🎬 **Update Media**\n\n🆔 ID: `{waifu_id}`\n\nSend the new **GIF or Video**:",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="ag_cancel")]])
+    )
+
+
+@app.on_callback_query(filters.regex(r'^ag_chrar_'))
+async def ag_change_rarity_cb(client, cq):
+    await cq.answer()
+    waifu_id = cq.data.split("ag_chrar_", 1)[-1]
+    # Store waifu_id in state for the rarity set callback
+    anim_states[cq.from_user.id] = {"state": "changing_rarity", "waifu_id": waifu_id}
+    buttons = []
+    row = []
+    for rarity, short_key in rarity_short_keys.items():
+        emoji = rarity_emojis[rarity]
+        label = rarity.split()[1]
+        row.append(InlineKeyboardButton(f"{emoji} {label}", callback_data=f"ag_setr_{short_key}_{waifu_id}"))
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="ag_cancel")])
+    await cq.message.edit_text(
+        f"✨ Choose new rarity for ID `{waifu_id}`:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+
+@app.on_callback_query(filters.regex(r'^ag_setr_'))
+async def ag_set_rarity_cb(client, cq):
+    await cq.answer()
+    # Format: ag_setr_{short_key}_{waifu_id}
+    parts = cq.data.split("ag_setr_", 1)[-1].split("_", 1)
+    short_key = parts[0]
+    waifu_id = parts[1] if len(parts) > 1 else None
+    new_rarity = rarity_key_to_name.get(short_key)
+
+    if not new_rarity or not waifu_id:
+        return await cq.answer("❌ Invalid data.", show_alert=True)
+
+    waifu = await collection.find_one({"id": waifu_id})
+    if not waifu:
+        return await cq.answer("❌ Waifu not found.", show_alert=True)
+
+    old_rarity = waifu["rarity"]
+    await collection.update_one({"id": waifu_id}, {"$set": {"rarity": new_rarity}})
+    updated = await collection.find_one({"id": waifu_id})
+    caption = f"✨ Rarity Updated!\n👧 {updated['name']}\n🛠 Old: {old_rarity}\n🌟 New: {new_rarity}"
+    await send_anim_media(cq.from_user.id, updated["anim_url"], updated.get("media_type", "animation"), caption)
+    await send_anim_media(CHARA_CHANNEL_ID, updated["anim_url"], updated.get("media_type", "animation"), caption)
+    await send_anim_media(SUPPORT_CHAT, updated["anim_url"], updated.get("media_type", "animation"), caption)
+    await cq.message.edit_text(f"✅ Rarity updated to `{new_rarity}`.")
+    anim_states.pop(cq.from_user.id, None)
+
+
+@app.on_callback_query(filters.regex(r'^ag_chrev_'))
+async def ag_change_event_cb(client, cq):
+    await cq.answer()
+    waifu_id = cq.data.split("ag_chrev_", 1)[-1]
+    anim_states[cq.from_user.id] = {"state": "changing_event", "waifu_id": waifu_id}
+    await cq.message.edit_text(
+        "🎊 Choose new event:",
+        reply_markup=get_anim_event_buttons(change_mode=True)
+    )
+
+
+@app.on_callback_query(filters.regex(r'^ag_evc_'))
+async def ag_set_event_change_cb(client, cq):
+    await cq.answer()
+    user_id = cq.from_user.id
+    short_key = cq.data.split("ag_evc_", 1)[-1]
+    state_data = anim_states.get(user_id, {})
+    waifu_id = state_data.get("waifu_id")
+
+    if not waifu_id:
+        return await cq.message.edit_text("❌ Session expired. Use /aedit again.")
+
+    new_event = None if short_key == "skip" else event_key_to_name.get(short_key)
+    await collection.update_one({"id": waifu_id}, {"$set": {"event": new_event}})
+    await cq.message.edit_text(f"✅ Event updated to: `{new_event or 'None'}`")
+    anim_states.pop(user_id, None)
+
+
+@app.on_callback_query(filters.regex(r'^ag_destroy_'))
+async def ag_destroy_cb(client, cq):
+    await cq.answer()
+    waifu_id = cq.data.split("ag_destroy_", 1)[-1]
+    waifu = await collection.find_one_and_delete({"id": waifu_id})
+    if waifu:
+        await collection.update_many({}, {"$pull": {"harem": waifu_id}})
+        await cq.message.edit_text(f"✅ Waifu `{waifu_id}` permanently destroyed.")
+        caption = (
+            f"⚰️ Destroyed by "
+            f"<a href='tg://user?id={cq.from_user.id}'>{cq.from_user.first_name}</a>: "
+            f"**'{waifu['name']}'**"
+        )
+        await send_anim_media(CHARA_CHANNEL_ID, waifu["anim_url"], waifu.get("media_type", "animation"), caption)
+        await send_anim_media(SUPPORT_CHAT, waifu["anim_url"], waifu.get("media_type", "animation"), caption)
+    else:
+        await cq.message.edit_text("❌ Waifu not found.")
+
+
+@app.on_callback_query(filters.regex(r'^ag_delete_'))
+async def ag_delete_cb(client, cq):
+    await cq.answer()
+    waifu_id = cq.data.split("ag_delete_", 1)[-1]
+    waifu = await collection.find_one_and_delete({"id": waifu_id})
+    if waifu:
+        await cq.message.edit_text(f"✅ Waifu `{waifu_id}` deleted.")
+        caption = f"📢 Deleted: **'{waifu['name']}'**"
+        await send_anim_media(CHARA_CHANNEL_ID, waifu["anim_url"], waifu.get("media_type", "animation"), caption)
+        await send_anim_media(SUPPORT_CHAT, waifu["anim_url"], waifu.get("media_type", "animation"), caption)
+    else:
+        await cq.message.edit_text("❌ Failed. Waifu not found.")
+
+
+# ─────────────────────────────────────────────
+# CANCEL
+# ─────────────────────────────────────────────
+
+@app.on_callback_query(filters.regex(r'^ag_cancel$'))
+async def ag_cancel_cb(client, cq):
+    await cq.answer()
+    anim_states.pop(cq.from_user.id, None)
+    await cq.message.edit_text("🚫 Cancelled. Start again with /aupload")

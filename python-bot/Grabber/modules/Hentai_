@@ -1,0 +1,335 @@
+from pyrogram import Client, filters, enums
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from datetime import datetime, timedelta
+import random
+import time
+import asyncio
+import json
+import os
+from . import Grabberu as app, user_collection
+
+class HentaiGame:
+    def __init__(self):
+        self.characters = self.load_characters()
+        self.scenes = self.load_scenes()
+        self.mini_games = ["Strip Poker", "Truth or Dare", "Sensual Massage", "Roleplay"]
+        
+    def load_characters(self):
+        return {
+            "1": {"name": "Aiko", "level": 1, "affection": 0, "scenes_unlocked": []},
+            "2": {"name": "Yumi", "level": 1, "affection": 0, "scenes_unlocked": []},
+            "3": {"name": "Hana", "level": 1, "affection": 0, "scenes_unlocked": []}
+        }
+        
+    def load_scenes(self):
+        return {
+            "1": {"name": "Beach Date", "min_level": 1, "cost": 100},
+            "2": {"name": "Private Lesson", "min_level": 3, "cost": 300},
+            "3": {"name": "Night Surprise", "min_level": 5, "cost": 500}
+        }
+        
+    def get_random_dialogue(self, character_id):
+        dialogues = [
+            f"{self.characters[character_id]['name']}: Hey there, handsome~",
+            f"{self.characters[character_id]['name']}: You're making me blush...",
+            f"{self.characters[character_id]['name']}: Wanna play a game with me?",
+            f"{self.characters[character_id]['name']}: I've been waiting for you...",
+            f"{self.characters[character_id]['name']}: You're so naughty!"
+        ]
+        return random.choice(dialogues)
+
+hentai_game = HentaiGame()
+
+# Command handlers
+@app.on_message(filters.command("hstart"))
+async def start_game(client: Client, message: Message):
+    user_id = str(message.from_user.id)
+    
+    if user_id not in user_collection:
+        user_collection[user_id] = {
+            "coins": 100,
+            "energy": 100,
+            "last_energy_refill": datetime.now().isoformat(),
+            "characters": hentai_game.characters,
+            "inventory": [],
+            "current_scene": None
+        }
+    
+    await message.reply_text(
+        "🎮 Welcome to Hentai Adventure! 🎮\n\n"
+        "Interact with beautiful characters, play games, and unlock intimate scenes!\n\n"
+        "Available commands:\n"
+        "/hcharacters - View available characters\n"
+        "/hinteract [id] - Talk to a character\n"
+        "/hplay - Play mini-games\n"
+        "/scenes - View unlockable scenes\n"
+        "/hprofile - View your stats\n"
+        "/hshop - Buy items to impress characters",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Meet Characters", callback_data="characters")],
+            [InlineKeyboardButton("Play Mini-Games", callback_data="minigames")]
+        ])
+    )
+
+@app.on_message(filters.command("hcharacters"))
+async def show_characters(client: Client, message: Message):
+    user_id = str(message.from_user.id)
+    if user_id not in user_collection:
+        await message.reply_text("Please start the game with /hstart first!")
+        return
+    
+    buttons = []
+    for char_id, char_data in hentai_game.characters.items():
+        buttons.append(
+            [InlineKeyboardButton(
+                f"{char_data['name']} (Lvl {char_data['level']}) - Affection: {char_data['affection']}/100",
+                callback_data=f"char_{char_id}"
+            )]
+        )
+    
+    await message.reply_text(
+        "🌟 Available Characters 🌟\n\n"
+        "Select a character to interact with:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+@app.on_message(filters.command("hinteract"))
+async def interact_character(client: Client, message: Message):
+    try:
+        char_id = message.command[1]
+        user_id = str(message.from_user.id)
+        
+        if user_id not in user_collection:
+            await message.reply_text("Please start the game with /hstart first!")
+            return
+            
+        if char_id not in hentai_game.characters:
+            await message.reply_text("Invalid character ID!")
+            return
+            
+        char_data = hentai_game.characters[char_id]
+        dialogue = hentai_game.get_random_dialogue(char_id)
+        
+        # Increase affection randomly
+        affection_increase = random.randint(1, 5)
+        char_data['affection'] = min(100, char_data['affection'] + affection_increase)
+        
+        # Check for level up
+        if char_data['affection'] >= char_data['level'] * 20:
+            char_data['level'] += 1
+            level_up_msg = f"\n\n🎉 {char_data['name']} has leveled up to {char_data['level']}!"
+        else:
+            level_up_msg = ""
+            
+        buttons = [
+            [InlineKeyboardButton("Talk Again", callback_data=f"talk_{char_id}")],
+            [InlineKeyboardButton("Give Gift", callback_data=f"gift_{char_id}")],
+            [InlineKeyboardButton("Private Scene", callback_data=f"scene_{char_id}")]
+        ]
+        
+        await message.reply_text(
+            f"{dialogue}\n\n"
+            f"Affection +{affection_increase} (Now: {char_data['affection']}/100)"
+            f"{level_up_msg}",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        
+    except IndexError:
+        await message.reply_text("Please specify a character ID! Use /characters to see available IDs.")
+
+@app.on_message(filters.command("hplay"))
+async def play_minigame(client: Client, message: Message):
+    user_id = str(message.from_user.id)
+    if user_id not in user_collection:
+        await message.reply_text("Please start the game with /start first!")
+        return
+    
+    buttons = []
+    for i, game in enumerate(hentai_game.mini_games, 1):
+        buttons.append([InlineKeyboardButton(game, callback_data=f"game_{i}")])
+    
+    await message.reply_text(
+        "🎲 Mini-Games 🎮\n\n"
+        "Play games to earn coins and increase character affection!\n"
+        "Select a game to play:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+@app.on_callback_query()
+async def handle_callbacks(client: Client, callback_query: CallbackQuery):
+    user_id = str(callback_query.from_user.id)
+    data = callback_query.data
+    
+    if data.startswith("char_"):
+        char_id = data.split("_")[1]
+        char_data = hentai_game.characters[char_id]
+        
+        await callback_query.message.edit_text(
+            f"💖 {char_data['name']} 💖\n"
+            f"Level: {char_data['level']}\n"
+            f"Affection: {char_data['affection']}/100\n\n"
+            f"Scenes Unlocked: {len(char_data['scenes_unlocked'])}/{len(hentai_game.scenes)}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Interact", callback_data=f"talk_{char_id}")],
+                [InlineKeyboardButton("Back to Characters", callback_data="characters")]
+            ])
+        )
+    
+    elif data.startswith("talk_"):
+        char_id = data.split("_")[1]
+        char_data = hentai_game.characters[char_id]
+        dialogue = hentai_game.get_random_dialogue(char_id)
+        
+        affection_increase = random.randint(1, 5)
+        char_data['affection'] = min(100, char_data['affection'] + affection_increase)
+        
+        await callback_query.message.edit_text(
+            f"{dialogue}\n\n"
+            f"Affection +{affection_increase} (Now: {char_data['affection']}/100)",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Talk Again", callback_data=f"talk_{char_id}")],
+                [InlineKeyboardButton("Private Scene", callback_data=f"scene_{char_id}")]
+            ])
+        )
+    
+    elif data.startswith("scene_"):
+        char_id = data.split("_")[1]
+        char_data = hentai_game.characters[char_id]
+        
+        if char_data['affection'] < 50:
+            await callback_query.answer("Not enough affection! Keep interacting with me~", show_alert=True)
+            return
+            
+        buttons = []
+        for scene_id, scene_data in hentai_game.scenes.items():
+            if scene_id in char_data['scenes_unlocked']:
+                status = "✅ Unlocked"
+            else:
+                status = f"🔒 {scene_data['cost']} coins"
+                
+            buttons.append([
+                InlineKeyboardButton(
+                    f"{scene_data['name']} (Lvl {scene_data['min_level']}) - {status}",
+                    callback_data=f"unlock_{char_id}_{scene_id}"
+                )
+            ])
+        
+        buttons.append([InlineKeyboardButton("Back", callback_data=f"char_{char_id}")])
+        
+        await callback_query.message.edit_text(
+            f"🔥 Private Scenes with {char_data['name']} 🔥\n\n"
+            "Unlock intimate scenes by increasing affection and paying coins:",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+    
+    elif data.startswith("unlock_"):
+        _, char_id, scene_id = data.split("_")
+        char_data = hentai_game.characters[char_id]
+        scene_data = hentai_game.scenes[scene_id]
+        
+        if scene_id in char_data['scenes_unlocked']:
+            # Play the scene
+            await callback_query.answer("Playing scene...", show_alert=True)
+            # In a real bot, this would show adult content
+            await callback_query.message.reply_text(
+                f"💋 You're now enjoying a private moment with {char_data['name']}...\n\n"
+                "The scene fades to black as things get intimate...",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Continue", callback_data=f"scene_{char_id}")]
+                ])
+            )
+            return
+            
+        if char_data['level'] < scene_data['min_level']:
+            await callback_query.answer(f"Character needs to be level {scene_data['min_level']}!", show_alert=True)
+            return
+            
+        if user_collection[user_id]['coins'] < scene_data['cost']:
+            await callback_query.answer("Not enough coins!", show_alert=True)
+            return
+            
+        # Unlock the scene
+        user_collection[user_id]['coins'] -= scene_data['cost']
+        char_data['scenes_unlocked'].append(scene_id)
+        
+        await callback_query.answer(f"Scene unlocked for {scene_data['cost']} coins!", show_alert=True)
+        await callback_query.message.edit_text(
+            f"🎉 You unlocked {scene_data['name']} with {char_data['name']}!\n\n"
+            f"Coins remaining: {user_collection[user_id]['coins']}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Play Scene", callback_data=f"unlock_{char_id}_{scene_id}")],
+                [InlineKeyboardButton("Back to Scenes", callback_data=f"scene_{char_id}")]
+            ])
+        )
+    
+    elif data == "characters":
+        buttons = []
+        for char_id, char_data in hentai_game.characters.items():
+            buttons.append([
+                InlineKeyboardButton(
+                    f"{char_data['name']} (Lvl {char_data['level']}) - Affection: {char_data['affection']}/100",
+                    callback_data=f"char_{char_id}"
+                )
+            ])
+        
+        await callback_query.message.edit_text(
+            "🌟 Available Characters 🌟\n\n"
+            "Select a character to interact with:",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+    
+    elif data.startswith("game_"):
+        game_idx = int(data.split("_")[1]) - 1
+        game_name = hentai_game.mini_games[game_idx]
+        
+        # Simulate game outcome
+        outcome = random.choice(["win", "lose", "draw"])
+        coins_change = random.randint(10, 50)
+        
+        if outcome == "win":
+            user_collection[user_id]['coins'] += coins_change
+            result_text = f"You won {coins_change} coins!"
+        elif outcome == "lose":
+            user_collection[user_id]['coins'] = max(0, user_collection[user_id]['coins'] - coins_change)
+            result_text = f"You lost {coins_change} coins..."
+        else:
+            result_text = "It's a draw! No coins won or lost."
+        
+        await callback_query.message.edit_text(
+            f"🎮 You played {game_name}!\n\n"
+            f"Result: {result_text}\n"
+            f"Total coins: {user_collection[user_id]['coins']}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Play Again", callback_data=data)],
+                [InlineKeyboardButton("Back to Games", callback_data="minigames")]
+            ])
+        )
+    
+    elif data == "minigames":
+        buttons = []
+        for i, game in enumerate(hentai_game.mini_games, 1):
+            buttons.append([InlineKeyboardButton(game, callback_data=f"game_{i}")])
+        
+        await callback_query.message.edit_text(
+            "🎲 Mini-Games 🎮\n\n"
+            "Play games to earn coins and increase character affection!\n"
+            "Select a game to play:",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+    
+    await callback_query.answer()
+
+# Energy regeneration task
+async def regenerate_energy():
+    while True:
+        await asyncio.sleep(60)  # Check every minute
+        
+        now = datetime.now()
+        for user_id, user_data in user_collection.items():
+            last_refill = datetime.fromisoformat(user_data['last_energy_refill'])
+            if (now - last_refill) >= timedelta(minutes=5):
+                user_data['energy'] = min(100, user_data['energy'] + 10)
+                user_data['last_energy_refill'] = now.isoformat()
+
+# Start energy regeneration task
+app.add_handler(regenerate_energy())

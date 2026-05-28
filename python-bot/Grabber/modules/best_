@@ -1,0 +1,56 @@
+import os
+import subprocess
+import requests
+from telegram import Update
+from telegram.ext import CommandHandler, CallbackContext, filters
+from . import application  
+
+# 🔹 GitHub Credentials
+GITHUB_USERNAME = "https://github.com/Og-peter/seizee"
+GITHUB_TOKEN = "GITHUB_TOKEN_PLACEHOLDER"
+REPO_NAME = "seizee"
+
+# 🔹 Git Authentication Fix (Set Proper URL)
+GIT_REMOTE_URL = f"https://{GITHUB_USERNAME}:{GITHUB_TOKEN}@github.com/{GITHUB_USERNAME}/{REPO_NAME}.git"
+subprocess.run(["git", "remote", "set-url", "origin", GIT_REMOTE_URL], check=True)
+
+# 🔹 Dev Users List
+DEV_USERS = [7861332030]  # Apni Telegram ID yaha add karo
+
+async def gitpull(update: Update, context: CallbackContext) -> None:
+    """Sirf dev users ke liye GitHub se update fetch karega aur bot restart karega."""
+    
+    if update.effective_user.id not in DEV_USERS:
+        await update.message.reply_text("❌ <b>Access Denied!</b> Only bot developers can use this command.", parse_mode="HTML")
+        return
+
+    await update.message.reply_text("🔄 <b>Checking for updates...</b>", parse_mode="HTML")
+
+    try:
+        # ✅ Run Git Pull (Authentication Fix)
+        process = subprocess.Popen(["git", "pull"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output, error = process.communicate()
+        output = output.decode("utf-8").strip()
+        error = error.decode("utf-8").strip()
+
+        if error:
+            await update.message.reply_text(f"⚠️ <b>Error:</b>\n<code>{error}</code>", parse_mode="HTML")
+            return
+
+        if "Already up to date" in output:
+            await update.message.reply_text("✅ <b>No updates found.</b> Bot is already up to date.", parse_mode="HTML")
+            return
+
+        # ✅ Restart the bot if updates found
+        await update.message.reply_text("✅ <b>Update applied! Restarting bot...</b>", parse_mode="HTML")
+        restart_bot()
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error occurred:\n<code>{e}</code>", parse_mode="HTML")
+
+def restart_bot():
+    """Restarts the bot using python3 -m Grabber"""
+    os.execvp("python3", ["python3", "-m", "Grabber"])
+
+# ✅ Command Handler with Proper Dev Filter
+application.add_handler(CommandHandler("gitpull", gitpull, filters=filters.User(DEV_USERS)))

@@ -1,0 +1,111 @@
+import random
+from pyrogram import Client, filters
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
+from . import Grabberu as app, JOINLOGS
+
+DEV_ID = 7861332030
+BOT_IMAGE = "https://files.catbox.moe/4mh4vb.jpg"  # You can change this!
+
+# Buttons
+WELCOME_BTNS = InlineKeyboardMarkup([
+    [InlineKeyboardButton("➕ Add to Group", url="https://t.me/CaptureCharacterBot?startgroup=true")],
+    [
+        InlineKeyboardButton("📢 Updates", url="https://t.me/Capture_Update"),
+        InlineKeyboardButton("💬 Support", url="https://t.me/TheNightTalks")
+    ]
+])
+
+# Developer greeting messages
+DEV_MESSAGES = [
+    "⚡ *The Creator has spawned!* All systems: Maximum Respect.",
+    "👑 *Master has entered the realm.* Everything just got serious.",
+    "🛠️ *Dev connected.* Ready for upgrades!",
+    "🎯 *Code Commander Online.*"
+]
+
+# Stylish welcome template
+WELCOME_MSG = """
+**⚡ Bot Activated in Group!**
+
+Hey {mention}, thanks for inviting me to **{title}**!  
+I’m your personal **Anime Character Capture Bot** – ready to steal hearts and spread chaos 💫
+
+🧩 Features:
+• Guess anime characters 🎭  
+• Trade and gift waifus 💌  
+• Climb the leaderboard 🏆  
+• Build your ultimate collection 📚
+
+Let’s make this group legendary 💥
+"""
+
+# Dev welcome template
+DEV_WELCOME = """
+👑 **Royal Entrance Detected!**
+
+{mention}, the legendary developer of this bot has arrived!  
+Everyone, roll out the red carpet and show your respect 🎉
+"""
+
+@app.on_message(filters.group & filters.new_chat_members)
+async def new_member_handler(client: Client, message: Message):
+    bot = await client.get_me()
+
+    for user in message.new_chat_members:
+        # Developer joins
+        if user.id == DEV_ID:
+            await message.reply_text(
+                DEV_WELCOME.format(mention=user.mention),
+                reply_markup=WELCOME_BTNS
+            )
+            return
+
+        # Bot joins
+        if user.id == bot.id:
+            added_by = message.from_user
+            if not added_by:
+                return
+
+            member_count = await client.get_chat_members_count(message.chat.id)
+            if member_count < 35:
+                await client.send_message(
+                    message.chat.id,
+                    "**⚠️ I only work in groups with at least 35 members.\nLeaving now...**"
+                )
+                await client.leave_chat(message.chat.id)
+                return
+
+            await client.send_message(
+                message.chat.id,
+                WELCOME_MSG.format(mention=added_by.mention, title=message.chat.title),
+                reply_markup=WELCOME_BTNS
+            )
+
+            try:
+                await client.send_message(added_by.id, "**Heya!** Thanks for adding me to your group! Type `/help` to get started 🌟")
+            except:
+                pass
+
+            # Logging
+            group_link = f"[{message.chat.title}](https://t.me/{message.chat.username})" if message.chat.username else f"Private Group"
+            log_msg = f"""
+🆕 **Bot Added to New Group!**
+
+🏷️ **Group Name:** {message.chat.title}  
+🆔 **Group ID:** `{message.chat.id}`  
+🔗 **Group:** {group_link}  
+👥 **Members:** `{member_count}`  
+👤 **Added by:** {added_by.mention}
+"""
+            await client.send_photo(
+                chat_id=JOINLOGS,
+                photo=BOT_IMAGE,
+                caption=log_msg,
+                reply_markup=WELCOME_BTNS
+            )
+
+@app.on_message(filters.group & filters.text & filters.user(DEV_ID))
+async def handle_dev_message(client: Client, message: Message):
+    text = message.text.lower()
+    if any(word in text for word in ["hello", "hlo", "seize", "qt", "yo"]):
+        await message.reply_text(random.choice(DEV_MESSAGES))

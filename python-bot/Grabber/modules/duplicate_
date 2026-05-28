@@ -1,0 +1,179 @@
+import io
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from . import collection, user_collection, app
+from .block import block_dec, temp_block
+from telegram.error import BadRequest
+from pyrogram.enums import ParseMode
+
+
+DUPLICATE_CACHE = {}
+
+# Duplicate Command
+@app.on_message(filters.command("duplicate") & (filters.group | filters.private))
+@block_dec
+async def duplicate(client: Client, message: Message) -> None:
+    user_id = message.from_user.id
+    if user_id in temp_block and time.time() < temp_block[user_id]:
+        return
+
+    user = await user_collection.find_one({'id': user_id})
+    if not user or 'characters' not in user:
+        await message.reply_text('❌ You have no collected characters yet.')
+        return
+
+    character_counts = {}
+    for character in user['characters']:
+        char_id = character['id']
+        character_counts[char_id] = character_counts.get(char_id, 0) + 1
+
+    duplicate_characters = {char_id: count for char_id, count in character_counts.items() if count > 1}
+    if not duplicate_characters:
+        await message.reply_text('✅ You have no duplicate characters.')
+        return
+
+    duplicate_character_details = await collection.find({'id': {'$in': list(duplicate_characters.keys())}}).to_list(length=None)
+
+    # Sorting by Rarity First, Then by Count
+    duplicate_character_details.sort(key=lambda x: (-duplicate_characters[x['id']], x.get('rarity', 'Unknown')))
+
+    # Prepare Cache & Pagination
+    DUPLICATE_CACHE[user_id] = {
+        'data': duplicate_character_details,
+        'counts': duplicate_characters,
+        'page': 0
+    }
+
+    await send_duplicate_page(client, message, user_id)
+
+# Send Duplicate Page
+async def send_duplicate_page(client: Client, message: Message, user_id: int, page: int = 0):
+    if user_id not in DUPLICATE_CACHE:
+        return
+
+    data = DUPLICATE_CACHE[user_id]['data']
+    counts = DUPLICATE_CACHE[user_id]['counts']
+    total_pages = (len(data) - 1) // 10 + 1
+
+    start_idx = page * 10
+    end_idx = start_idx + 10
+    paginated_data = data[start_idx:end_idx]
+
+    duplicate_text = f"📜 Duplicate Characters ({len(counts)} total)\n\n"
+    for character in paginated_data:
+        char_id = character['id']
+        count = counts[char_id]
+        rarity = character.get('rarity', 'Unknown')
+        duplicate_text += (
+            f"🥂 {character['name']}\n"
+            f"   ⛩️ [{character['anime']}]\n"
+            f"   🍁 ID: {char_id} ({count}x)\n"
+            f"   ❄️ Rarity: {rarity}\n"
+            f"   💸 /sell {char_id}\n\n"
+        )
+
+    buttons = []
+    if total_pages > 1:
+        buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"dup_prev_{user_id}"))
+        buttons.append(InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="noop"))
+        buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"dup_next_{user_id}"))
+
+    buttons.append(InlineKeyboardButton("📁 Export List", callback_data=f"dup_export_{user_id}"))
+    buttons.append(InlineKeyboardButton("🗑️ Close", callback_data=f"dup_close_{user_id}"))
+
+    await message.reply_text(
+        duplicate_text,
+        reply_markup=InlineKeyboardMarkup([buttons]),
+        disable_web_page_preview=True
+    )
+
+# Sell Command
+@app.on_message(filters.command("sell") & (filters.group | filters.private))
+@block_dec
+async def sell_character(client: Client, message: Message):
+    user_id = message.from_user.id
+    if user_id in temp_block and time.time() < temp_block[user_id]:
+        return
+    
+    if len(message.command) < 2:
+        await message.reply_text("❌ Please provide a character ID to sell. Example: /sell 1234")
+        return
+    
+    char_id = message.command[1]
+
+    # Get Character Details
+    character = await collection.find_one({'id': char_id})
+    if not character:
+        await message.reply_text("❌ Invalid character ID.")
+        return
+
+    # Check if User Owns the Character
+    user = await user_collection.find_one({'id': user_id})
+    if not user or 'characters' not in user:
+        await message.reply_text('❌ You have no characters to sell.')
+        return
+
+    user_char_ids = [char['id'] for char in user['characters']]
+    if user_char_ids.count(char_id) < 2:
+        await message.reply_text("❌ You don't have enough duplicates to sell this character.")
+        return
+
+    rarity = character.get('rarity', 'Common')
+    price = {"Common": 100, "Rare": 300, "Epic": 800, "Legendary": 2000}.get(rarity, 50)
+
+    # Confirmation Text
+    confirmation_text = f"💸 Sell {character['name']}?\n❄️ Rarity: {rarity}\n💰 Price: {price} Coins"
+
+    # Buttons
+    buttons = [
+        [InlineKeyboardButton("✅ Confirm", callback_data=f"sell_confirm_{char_id}_{user_id}")],
+        [InlineKeyboardButton("❌ Cancel", callback_data=f"sell_cancel_{user_id}")]
+    ]
+    keyboard = InlineKeyboardMarkup(buttons)
+
+    # Get Image and Video URLs
+    img_url = character.get('img_url', '').strip()
+    video_url = character.get('video_url', '').strip()
+
+    try:
+        if video_url:
+            # ✅ Agar Video Hai to Send Video
+            await message.reply_video(
+                video=video_url,
+                caption=confirmation_text,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML
+            )
+        elif img_url:
+            # ✅ Agar Image Hai to Send Photo
+            await message.reply_photo(
+                photo=img_url,
+                caption=confirmation_text,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            # ✅ Agar Na Video Na Image, To Normal Message Send Karo
+            await message.reply_text(confirmation_text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+    except BadRequest as e:
+        await message.reply_text(f"<b>Error:</b> {str(e)}", parse_mode=ParseMode.HTML)
+
+# Confirm or Cancel Sale
+@app.on_callback_query(filters.regex(r"sell_(confirm|cancel)_(\d+)_(\d+)"))
+async def sell_confirm(client: Client, query):
+    action, char_id, user_id = query.data.split("_")[1:]
+
+    if query.from_user.id != int(user_id):
+        await query.answer("🚫 This is not your sale!", show_alert=True)
+        return
+
+    if action == "confirm":
+        await user_collection.update_one({'id': int(user_id)}, {'$pull': {'characters': {'id': char_id}}})
+        rarity = (await collection.find_one({'id': char_id})).get('rarity', 'Common')
+        price = {"Common": 100, "Rare": 300, "Epic": 800, "Legendary": 2000}.get(rarity, 50)
+
+        await user_collection.update_one({'id': int(user_id)}, {'$inc': {'coins': price}}, upsert=True)
+        await query.message.edit_text(f"✅ Character sold!\n💰 You received {price} coins.")
+    
+    elif action == "cancel":
+        await query.message.delete()

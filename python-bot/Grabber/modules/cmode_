@@ -1,0 +1,129 @@
+from pyrogram import Client, filters
+from pyrogram.types import InlineKeyboardMarkup as IKM, InlineKeyboardButton as IKB, InputMediaPhoto
+from PIL import Image, ImageDraw, ImageFont
+import os
+
+# Database and App Imports
+from . import user_collection, app
+from .block import temp_block
+
+# Paths
+FONT_PATH = "Fonts/font.ttf"
+BG_IMAGE_PATH = "Images/cmode.jpg"
+
+
+def create_cmode_image(full_name, user_id, current_rarity, dp_path=None):
+    img = Image.open(BG_IMAGE_PATH).convert("RGBA")
+    d = ImageDraw.Draw(img)
+    font = ImageFont.truetype(FONT_PATH, 35)
+    rarity_font = ImageFont.truetype(FONT_PATH, 30)
+
+    full_name = full_name or "Unknown User"
+    dp_size = (120, 120)
+    dp_x, dp_y = 50, 120
+
+    if dp_path:
+        try:
+            user_dp = Image.open(dp_path).convert("RGBA")
+            user_dp = user_dp.resize(dp_size, Image.ANTIALIAS)
+            mask = Image.new("L", dp_size, 0)
+            draw_mask = ImageDraw.Draw(mask)
+            draw_mask.ellipse((0, 0, dp_size[0], dp_size[1]), fill=255)
+            img.paste(user_dp, (dp_x, dp_y), mask)
+        except Exception:
+            pass
+
+    name_x, name_y = 400, 140
+    rarity_x, rarity_y = 400, 190
+
+    d.text((name_x, name_y), full_name, fill=(0, 0, 0), font=font)
+    d.text((rarity_x, rarity_y), f"Rarity: {current_rarity}", fill=(0, 0, 0), font=rarity_font)
+
+    img_path = f'/tmp/cmode_{user_id}.png'
+    img.save(img_path)
+    return img_path
+
+
+@app.on_message(filters.command("cmode") & filters.group)
+async def cmode(client, message):
+    user_id = message.from_user.id
+    if user_id in temp_block:
+        return
+
+    full_name = message.from_user.first_name + (" " + message.from_user.last_name if message.from_user.last_name else "")
+    
+    try:
+        chat_member = await client.get_chat_member(message.chat.id, user_id)
+        user_dp = chat_member.user.photo.big_file_id if chat_member.user.photo else None
+    except Exception:
+        user_dp = None
+
+    user_data = await user_collection.find_one({'id': user_id})
+    current_rarity = user_data.get('collection_mode', '⚫ Common') if user_data else '⚫ Common'
+
+    dp_path = await client.download_media(user_dp) if user_dp else None
+    img_path = create_cmode_image(full_name, user_id, current_rarity, dp_path)
+
+    all_buttons = [
+        ('⚫ Common', 'common'), ('🟤 Uncommon', 'uncommon'), ('🟠 Rare', 'rare'),
+        ('🟣 Epic', 'epic'), ('🟡 Legendary', 'legendary'), ('💮 Mythic', 'mythic'),
+        ('🔱 Godly', 'godly'), ('🔮 Limited Edition', 'limited'), ('🫧 Premium', 'premium'),
+        ('🏵️ Exotic', 'exotic'), ('⚜️ Unique', 'unique'), ('⚡ Eternal', 'eternal'),
+        ('🧬 Animation', 'animation'), ('🍁 Radiant', 'radiant'), ('💠 Divine', 'divine'),
+        ('🎐 Celestial', 'celestial'), ('🌩️ Electra', 'electra'), ('🧿 Galaxia', 'galaxia'),
+        ('☀️ Summer[Su]', 'summer'), ('All', 'all')
+    ]
+
+    cmode_buttons = []
+    for i in range(0, len(all_buttons), 3):
+        row = [IKB(name, f'cmode:{key}:{user_id}') for name, key in all_buttons[i:i+3]]
+        cmode_buttons.append(row)
+
+    await message.reply_photo(
+        photo=img_path,
+        caption="✨ **Select your collection mode** ✨",
+        reply_markup=IKM(cmode_buttons)
+    )
+
+
+@app.on_callback_query(filters.regex(r"^cmode:"))
+async def cmode_callback(client, callback_query):
+    _, rarity, user_id = callback_query.data.split(':')
+    user_id = int(user_id)
+
+    rarity_modes = {
+        'common': '⚫ Common', 'uncommon': '🟤 Uncommon', 'rare': '🟠 Rare',
+        'epic': '🟣 Epic', 'legendary': '🟡 Legendary', 'mythic': '💮 Mythic',
+        'godly': '🔱 Godly', 'limited': '🔮 Limited Edition', 'premium': '🫧 Premium',
+        'exotic': '🏵️ Exotic', 'unique': '⚜️ Unique', 'eternal': '⚡ Eternal',
+        'animation': '🧬 Animation', 'radiant': '🍁 Radiant', 'divine': '💠 Divine',
+        'celestial': '🎐 Celestial', 'electra': '🌩️ Electra', 'galaxia': '🧿 Galaxia',
+        'summer': '☀️ Summer[Su]', 'all': 'All'
+    }
+
+    collection_mode = rarity_modes.get(rarity)
+    if not collection_mode:
+        await callback_query.answer("⚠️ Invalid mode.", show_alert=True)
+        return
+
+    if callback_query.from_user.id != user_id:
+        await callback_query.answer("⚠️ You can't modify others' collection mode.", show_alert=True)
+        return
+
+    user_data = await user_collection.find_one({'id': user_id})
+    if not user_data:
+        await callback_query.answer("⚠️ User data not found.", show_alert=True)
+        return
+
+    await user_collection.update_one({'id': user_id}, {'$set': {'collection_mode': collection_mode}})
+
+    try:
+        chat_member = await client.get_chat_member(callback_query.message.chat.id, user_id)
+        user_dp = chat_member.user.photo.big_file_id if chat_member.user.photo else None
+    except Exception:
+        user_dp = None
+
+    dp_path = await client.download_media(user_dp) if user_dp else None
+    img_path = create_cmode_image(callback_query.from_user.first_name, user_id, collection_mode, dp_path)
+    await callback_query.edit_message_media(InputMediaPhoto(img_path))
+    await callback_query.edit_message_caption(f"✅ **Collection mode updated to:** `{collection_mode}`")

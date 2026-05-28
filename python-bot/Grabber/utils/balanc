@@ -1,0 +1,24 @@
+from Grabber import db  # Import only the DB instance
+
+user_collection = db["user_collection"]  # Use it locally
+
+async def add(user_id: int, amount: int):
+    """User ke balance me amount add karega"""
+    user = await user_collection.find_one({"user_id": user_id})
+    if user:
+        await user_collection.update_one({"user_id": user_id}, {"$inc": {"balance": amount}})
+    else:
+        await user_collection.insert_one({"user_id": user_id, "balance": amount})
+
+async def deduct(user_id: int, amount: int):
+    """User ke balance me amount deduct karega"""
+    user = await user_collection.find_one({"user_id": user_id})
+    if user and user.get("balance", 0) >= amount:
+        await user_collection.update_one({"user_id": user_id}, {"$inc": {"balance": -amount}})
+        return True
+    return False  # Agar balance kam hai toh false return hoga
+
+async def show(user_id: int):
+    """User ka balance show karega"""
+    user = await user_collection.find_one({"user_id": user_id})
+    return user.get("balance", 0) if user else 0

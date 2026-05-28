@@ -1,0 +1,336 @@
+from pyrogram import filters
+from pyrogram.types import InlineKeyboardMarkup as IKM, InlineKeyboardButton as IKB
+from Grabber import app, user_collection
+from .block import block_dec, block_cbq
+import random
+import time
+from bson.objectid import ObjectId
+
+mass_abuse = random.choice([
+    "🚫 These gifts aren't for you! Hands off!",
+    "🔒 Only the sender can confirm mass gifts. Stop snooping!",
+    "❌ Trying to steal someone's gift collection? Not happening!",
+    "⚠️ These characters belong to someone else. Back away!",
+    "Hey! Only the original gifter can confirm this bulk transfer!"
+])
+
+# Maximum characters for callback data (64 bytes is Telegram's limit)
+MAX_CALLBACK_DATA = 64
+
+async def store_transfer_data(sender_id, receiver_id, char_ids):
+    """Store transfer data in database and return reference ID"""
+    transfer_id = str(ObjectId())
+    await user_collection.update_one(
+        {"id": "mass_transfers"},
+        {"$set": {f"transfers.{transfer_id}": {
+            "sender": sender_id,
+            "receiver": receiver_id,
+            "char_ids": char_ids,
+            "timestamp": time.time()
+        }}},
+        upsert=True
+    )
+    return transfer_id
+
+async def get_transfer_data(transfer_id):
+    """Retrieve transfer data from database"""
+    data = await user_collection.find_one(
+        {"id": "mass_transfers"},
+        {f"transfers.{transfer_id}": 1}
+    )
+    if data and "transfers" in data and transfer_id in data["transfers"]:
+        return data["transfers"][transfer_id]
+    return None
+
+async def cleanup_transfer_data(transfer_id):
+    """Remove transfer data from database"""
+    await user_collection.update_one(
+        {"id": "mass_transfers"},
+        {"$unset": {f"transfers.{transfer_id}": ""}}
+    )
+
+@app.on_message(filters.command("massgift"))
+@block_dec
+async def mass_gift_handler(client, message):
+    if not message.reply_to_message:
+        return await message.reply("**🎁 Reply to a user and use** `/massgift <id1> <id2> <id3>...` **to gift multiple characters.**")
+
+    if len(message.command) < 2:
+        return await message.reply("**❗ Please specify character IDs:** `/massgift <id1> <id2> <id3>...`")
+
+    sender = message.from_user
+    receiver = message.reply_to_message.from_user
+    char_ids = message.command[1:]
+
+    if sender.id == receiver.id:
+        return await message.reply("**❌ You can't gift characters to yourself!**")
+
+    # Remove duplicates and validate IDs
+    char_ids = list(set(char_ids))
+    if not all(cid.isdigit() for cid in char_ids):
+        return await message.reply("**❌ All character IDs must be numeric values.**")
+    
+    if len(char_ids) > 10:
+        return await message.reply("**⚠️ You can only gift up to 10 characters at once.**")
+
+    user_data = await user_collection.find_one({"id": sender.id})
+    if not user_data or "characters" not in user_data or not user_data["characters"]:
+        return await message.reply("**⚠️ You have no characters in your harem.**")
+
+    # Check for locked characters first
+    locked_chars = [c for c in user_data["characters"] if c.get("locked") and "id" in c]
+    if locked_chars:
+        locked_names = "\n".join([f"• {c.get('name', 'Unknown')} (ID: {c['id']})" for c in locked_chars])
+        return await message.reply(
+            f"**⚠️ You have ongoing gifts for these characters. Complete or cancel them first:**\n{locked_names}\n\n"
+            f"**Use** `/mcancel` **to cancel all outgoing gifts.**"
+        )
+
+    # Find all requested characters (with proper ID checking)
+    available_chars = []
+    missing_ids = []
+    
+    for char_id in char_ids:
+        char = next((c for c in user_data["characters"] if str(c.get("id")) == str(char_id)), None)
+        if char:
+            available_chars.append(char)
+        else:
+            missing_ids.append(char_id)
+
+    if missing_ids:
+        missing_msg = "\n".join([f"• `{id}`" for id in missing_ids])
+        await message.reply(f"**❌ These IDs weren't found in your harem:**\n{missing_msg}")
+
+    if not available_chars:
+        return
+
+    # Create update operations safely
+    update_operations = {}
+    for i, char in enumerate(user_data["characters"]):
+        if "id" in char and str(char["id"]) in [str(c["id"]) for c in available_chars]:
+            update_operations[f"characters.{i}.locked"] = True
+
+    if not update_operations:
+        return await message.reply("**⚠️ No valid characters found to lock for transfer.**")
+
+    # Lock all characters for gifting
+    await user_collection.update_one(
+        {"id": sender.id},
+        {"$set": update_operations}
+    )
+
+    # Prepare character list message
+    char_list = "\n".join([
+        f"**• {i+1}. {char.get('name', 'Unknown')}** (ID: `{char['id']}`) \n  └ *{char.get('anime', 'Unknown')}* | {char.get('rarity', 'Unknown')}"
+        for i, char in enumerate(available_chars)
+    ])
+
+    caption = f"""
+**🎁 Mass Gift Confirmation**
+
+You're about to send **{len(available_chars)} characters** to [{receiver.first_name}](tg://user?id={receiver.id})!
+
+━━━━━━━━━━━━━━━━━━
+{char_list}
+━━━━━━━━━━━━━━━━━━
+
+**Total Characters**: {len(available_chars)}
+**Receiver**: [{receiver.first_name}](tg://user?id={receiver.id})
+
+Do you wish to proceed with this **bulk character transfer**?
+"""
+
+    # Always use database reference for callback data to avoid size issues
+    transfer_id = await store_transfer_data(
+        sender.id,
+        receiver.id,
+        [str(c["id"]) for c in available_chars]
+    )
+
+    keyboard = IKM([
+        [IKB("✅ Confirm Transfer", callback_data=f"mass_send:{transfer_id}")],
+        [IKB("❌ Cancel All", callback_data=f"mass_cancel:{transfer_id}")]
+    ])
+
+    await message.reply_text(
+        caption,
+        reply_markup=keyboard,
+        disable_web_page_preview=True
+    )
+
+
+@app.on_message(filters.command("mcancel"))
+@block_dec
+async def mass_cancel_handler(client, message):
+    user_id = message.from_user.id
+    user_data = await user_collection.find_one({"id": user_id})
+    
+    if not user_data:
+        return await message.reply("**❌ You don't have any characters in your harem.**")
+    
+    # Find all locked characters
+    locked_chars = [c for c in user_data.get("characters", []) if c.get("locked") and "id" in c]
+    
+    if not locked_chars:
+        return await message.reply("**ℹ️ You don't have any outgoing gifts to cancel.**")
+    
+    # Prepare update to unlock all characters
+    update_operations = {}
+    for i, char in enumerate(user_data["characters"]):
+        if "id" in char and char.get("locked"):
+            update_operations[f"characters.{i}.locked"] = False
+    
+    if update_operations:
+        await user_collection.update_one(
+            {"id": user_id},
+            {"$set": update_operations}
+        )
+    
+    # Prepare cancellation message
+    cancelled_list = "\n".join([
+        f"• {char.get('name', 'Unknown')} (ID: `{char['id']}`)"
+        for char in locked_chars
+    ])
+    
+    await message.reply(
+        f"**✅ Successfully cancelled {len(locked_chars)} outgoing gifts:**\n\n"
+        f"{cancelled_list}\n\n"
+        f"All characters have been returned to your harem."
+    )
+
+
+@app.on_callback_query(filters.regex(r"^mass_(send|cancel):(.+)"))
+@block_cbq
+async def mass_gift_callback(client, cb):
+    try:
+        action = cb.matches[0].group(1)
+        transfer_id = cb.matches[0].group(2)
+        
+        transfer_data = await get_transfer_data(transfer_id)
+        if not transfer_data:
+            return await cb.answer("Transfer data expired or not found!", show_alert=True)
+        
+        sender_id = transfer_data["sender"]
+        
+        if cb.from_user.id != sender_id:
+            return await cb.answer(mass_abuse, show_alert=True)
+        
+        char_ids = transfer_data["char_ids"]
+        receiver_id = transfer_data.get("receiver") if action == "mass_send" else None
+
+        if action == "mass_cancel":
+            # Get current character list
+            user_data = await user_collection.find_one({"id": sender_id})
+            if not user_data:
+                return await cb.answer("User data not found!", show_alert=True)
+
+            # Create unlock operations safely
+            update_operations = {}
+            for i, char in enumerate(user_data.get("characters", [])):
+                if "id" in char and str(char["id"]) in char_ids:
+                    update_operations[f"characters.{i}.locked"] = False
+
+            if update_operations:
+                await user_collection.update_one(
+                    {"id": sender_id},
+                    {"$set": update_operations}
+                )
+            
+            # Clean up transfer data
+            await cleanup_transfer_data(transfer_id)
+
+            return await cb.message.edit("**❌ Mass gift cancelled. All characters have been unlocked.**")
+
+        if action == "mass_send":
+            sender_data = await user_collection.find_one({"id": sender_id})
+            if not sender_data or "characters" not in sender_data:
+                return await cb.message.edit("**⚠️ Sender data not found.**")
+
+            # Find all locked characters that match the IDs
+            chars_to_transfer = []
+            remaining_chars = []
+            
+            for char in sender_data["characters"]:
+                if "id" in char and str(char["id"]) in char_ids and char.get("locked"):
+                    chars_to_transfer.append(char)
+                else:
+                    remaining_chars.append(char)
+
+            if not chars_to_transfer:
+                return await cb.message.edit("**⚠️ No valid characters found for transfer.**")
+
+            # Update sender's harem (remove transferred chars)
+            await user_collection.update_one(
+                {"id": sender_id},
+                {"$set": {"characters": remaining_chars}}
+            )
+
+            # Add to receiver
+            await user_collection.update_one(
+                {"id": receiver_id},
+                {"$push": {"characters": {"$each": chars_to_transfer}}},
+                upsert=True
+            )
+
+            # Clean up transfer data
+            await cleanup_transfer_data(transfer_id)
+
+            # Prepare transfer summary
+            char_summary = "\n".join([
+                f"• **{char.get('name', 'Unknown')}** (ID: `{char['id']}`)"
+                for char in chars_to_transfer
+            ])
+
+            # Try to get receiver info (with fallback)
+            receiver_name = "the user"
+            try:
+                receiver = await client.get_users(receiver_id)
+                receiver_name = receiver.first_name
+                receiver_mention = f"[{receiver_name}](tg://user?id={receiver.id})"
+            except:
+                receiver_mention = "the user"
+
+            await cb.message.edit(
+                f"**✅ Mass Transfer Complete!**\n\n"
+                f"**Sent {len(chars_to_transfer)} characters to {receiver_mention}:**\n"
+                f"{char_summary}\n\n"
+                f"✨ The receiver has been notified in their DMs."
+            )
+
+            # Prepare DM notification (only if we can message the user)
+            if receiver_id != sender_id:  # Don't notify if sending to self
+                dm_char_list = "\n".join([
+                    f"**• {i+1}. {char.get('name', 'Unknown')}** \n  └ *{char.get('anime', 'Unknown')}* | {char.get('rarity', 'Unknown')} | ID: `{char['id']}`"
+                    for i, char in enumerate(chars_to_transfer)
+                ])
+
+                notify_msg = f"""
+**🎉 You received {len(chars_to_transfer)} new characters!**
+
+━━━━━━━━━━━━━━━━━━
+{dm_char_list}
+━━━━━━━━━━━━━━━━━━
+
+**🎁 Gifted by**: [{cb.from_user.first_name}](tg://user?id={sender_id})
+**Total Received**: {len(chars_to_transfer)} characters
+
+✨ Check your harem with `/harem`!
+"""
+
+                try:
+                    await client.send_message(
+                        chat_id=receiver_id,
+                        text=notify_msg,
+                        disable_web_page_preview=True
+                    )
+                except Exception as e:
+                    print(f"Failed to notify receiver: {e}")
+                    # No need to show error to sender if DM fails
+
+    except Exception as e:
+        print(f"Error in mass gift callback: {e}")
+        await cb.answer("An error occurred. Please try again.", show_alert=True)
+        try:
+            await cb.message.edit("**❌ An error occurred during the transfer. Please try again.**")
+        except:
+            pass

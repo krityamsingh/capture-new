@@ -1,0 +1,861 @@
+import re
+from pyrogram import Client, filters
+from pyrogram.types import (
+    InlineKeyboardButton, InlineKeyboardMarkup, 
+    Message, ReplyKeyboardMarkup, KeyboardButton, CallbackQuery
+)
+from pymongo import ReturnDocument
+from Grabber import collection, db, CHARA_CHANNEL_ID, SUPPORT_CHAT, user_collection
+from . import uploader_filter, app  # uploader_filter used as sudo filter
+from pyrogram.types import InlineQueryResultArticle, InputTextMessageContent
+
+# Function to get the next sequence number for unique IDs
+async def get_next_sequence_number(sequence_name):
+    sequence_collection = db.sequences
+    sequence_document = await sequence_collection.find_one_and_update(
+        {'_id': sequence_name},
+        {'$inc': {'sequence_value': 1}},
+        return_document=ReturnDocument.AFTER
+    )
+    if not sequence_document:
+        await sequence_collection.insert_one({'_id': sequence_name, 'sequence_value': 0})
+        return 0
+    return sequence_document['sequence_value']
+    
+# Rarity emojis mapping
+rarity_emojis = {
+    '⚫ Common': '⚫',
+    '🔮 Limited Edition': '🔮',
+    '🫧 Premium': '🫧',
+    '💮 Mythic': '💮',
+    '🔱 Godly': '🔱',
+    '🟡 Legendary': '🟡',
+    '🟣 Epic': '🟣',
+    '🟠 Rare': '🟠',
+    '🟤 Uncommon': '🟤',
+    '🏵️ Exotic': '🏵️',
+    '⚜️ Unique': '⚜️',
+    '⚡ Eternal': '⚡',
+    '🧬 Animation': '🧬'
+   
+}
+
+# Dictionary to store user-selected anime states
+user_states = {}
+
+# Command to start upload (Only allowed for sudo users)
+@app.on_message(filters.private & filters.command(['upload.', 'upload,', 'upload?']) & uploader_filter)
+async def start_upload(client: Client, message: Message):
+    sudo_user_first_name = message.from_user.first_name  # Get sender’s first name
+    await message.reply_text(
+        f"🌸 *Konichiwa* [{sudo_user_first_name}](tg://user?id={message.from_user.id})~! 🌸\n\n"
+        "Welcome to the *Waifu Panel*! 💖 Here, you can manage and upload new waifus to expand the collection. "
+        "Let's make the waifu world even better together! ✨\n\n"
+        "Tap the button below to access the panel.",
+        reply_markup=ReplyKeyboardMarkup(
+            [[KeyboardButton("💮 Waifu Panel 💮")]],
+            resize_keyboard=True
+        ),
+    )
+
+# Admin panel command (Accessible only to sudo users)
+@app.on_message(filters.text & filters.private & filters.regex("^💮 Waifu Panel 💮$") & uploader_filter)
+async def waifu_panel(client, message):
+    bot_mention = f"[@{client.me.username}](tg://user?id={client.me.id})"
+    user_mention = f"[{message.from_user.first_name}](tg://user?id={message.from_user.id})"
+    
+    total_waifus = await collection.count_documents({})
+    total_animes = await collection.distinct("anime")
+    total_harems = await user_collection.count_documents({})
+
+    waifu_panel_message = (
+        f"🌸 **Welcome to the Waifu Panel!** 🌸\n\n"
+        f"{bot_mention} **greets** {user_mention}~! \n\n"
+        f"🍃 **Waifu Encyclopedia Count:** `{total_waifus}`\n"
+        f"⛩️ **Anime Universes Explored:** `{len(total_animes)}`\n"
+        f"🥂 **Total Harems Formed:** `{total_harems}`\n\n"
+        "Let's continue expanding the waifu world! "
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🍁 Add New Waifu", callback_data="add_waifu"),
+            InlineKeyboardButton("⛩️ Add New Anime", callback_data="add_anime")
+        ],
+        [
+            InlineKeyboardButton("🌱 View Anime", switch_inline_query_current_chat="choose_anime ")
+        ]
+    ])
+
+    await message.reply_text(waifu_panel_message, reply_markup=keyboard)
+    
+@app.on_message(filters.command("edit") & filters.private & uploader_filter)
+async def edit_waifu_command(client, message):
+    try:
+        if len(message.command) < 2:
+            await message.reply_text(
+                "🔍 **Waifu Editing Guide** 🔍\n\n"
+                "To edit a waifu, please provide the waifu ID.\n\n"
+                "📌 **Usage:** `/edit <waifu_id>`",
+            )
+            return
+
+        waifu_id = message.command[1]
+        waifu = await collection.find_one({"id": waifu_id})
+        
+        if waifu:
+            caption_text = (
+                f"❄️ **Waifu Editing Panel** ❄️\n\n"
+                f"☘️ **Name:** `{waifu['name']}`\n"
+                f"⛩️ **Anime:** `{waifu['anime']}`\n"
+                f"🍁 **Rarity:** `{waifu['rarity']}`\n\n"
+                "🛠️ Choose an option below to modify this waifu!"
+            )
+
+            buttons = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📝 Rename Waifu", callback_data=f"rename_waifu_{waifu_id}")],
+                [InlineKeyboardButton("🖼️ Update Image", callback_data=f"change_image_{waifu_id}")],
+                [InlineKeyboardButton("🎥 Update Video", callback_data=f"change_video_{waifu_id}")],
+                [InlineKeyboardButton("🍃 Change Rarity", callback_data=f"change_rarity_{waifu_id}")],
+                [InlineKeyboardButton("💀 Destroy Waifu", callback_data=f"destroy_waifu_{waifu_id}")],
+                [InlineKeyboardButton("🚮 Delete Waifu", callback_data=f"delete_waifu_{waifu_id}")]
+            ])
+
+            # Check if video exists
+            if "video_url" in waifu and waifu["video_url"]:
+                await message.reply_video(video=waifu["video_url"], caption=caption_text, reply_markup=buttons)
+            else:
+                await message.reply_photo(photo=waifu["img_url"], caption=caption_text, reply_markup=buttons)
+        else:
+            await message.reply_text("❌ **Waifu not found.**\n\nPlease check the ID and try again. 🧐")
+    except Exception as e:
+        await message.reply_text(f"⚠️ **Oops! An error occurred:** `{str(e)}`\n\nPlease try again later. 🔄")
+        
+@app.on_callback_query(filters.regex('^add_waifu$'))
+async def add_waifu_callback(client, callback_query):
+    await callback_query.message.edit_text(
+        "🌸 **Waifu Registration Begins!** 🌸\n\n"
+        "To add a new waifu, please select the anime universe she belongs to. 📺✨\n\n"
+        "🔍 **Search for an anime below or cancel the process if needed.**",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("🔎 Search Anime", switch_inline_query_current_chat="choose_anime ")
+                ],
+                [
+                    InlineKeyboardButton("❌ Cancel Process", callback_data="cancel_add_waifu")
+                ]
+            ]
+        )
+    )
+
+    user_states[callback_query.from_user.id] = {
+        "state": "selecting_anime",
+        "anime": None,
+        "name": None,
+        "rarity": None,
+        "action": "add"
+    }
+
+@app.on_callback_query(filters.regex('^select_rarity_'))
+async def select_rarity_callback(client, callback_query):
+    selected_rarity = callback_query.data.split('_', 2)[-1]
+    user_states[callback_query.from_user.id]["rarity"] = selected_rarity
+    user_states[callback_query.from_user.id]["state"] = "awaiting_waifu_media"
+
+    await callback_query.message.edit_text(
+        f"🎖 **Rarity Selected:** `{selected_rarity.capitalize()}`\n\n"
+        "📸 **Now, please send the waifu's image or video!**\n"
+        "Make sure to choose a high-quality media that represents her well. ✨",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("❌ Cancel Process", callback_data="cancel_add_waifu")]]
+        )
+    )
+
+@app.on_message(filters.private & (filters.photo | filters.video))
+async def receive_media(client, message):
+    try:
+        user_data = user_states.get(message.from_user.id)
+
+        if user_data:
+            media_url = None
+            media_type = None
+
+            if message.photo:
+                media_url = message.photo.file_id
+                media_type = "image"
+            elif message.video:
+                media_url = message.video.file_id
+                media_type = "video"
+
+            if media_url and user_data["state"] == "awaiting_waifu_media" and user_data["name"] and user_data["rarity"]:
+                # Handling waifu addition process
+                waifu_id = str(await get_next_sequence_number('character_id')).zfill(2)
+
+                waifu_data = {
+                    'name': user_data["name"],
+                    'anime': user_data["anime"],
+                    'rarity': user_data["rarity"],
+                    'id': waifu_id,
+                }
+
+                if media_type == "image":
+                    waifu_data["img_url"] = media_url
+                elif media_type == "video":
+                    waifu_data["video_url"] = media_url
+
+                await collection.insert_one(waifu_data)
+                await message.reply_text("⏳ **Adding your waifu...** Please wait a moment. ✨")
+
+                waifu_caption = (
+                    f"🌸 **New Waifu Added!** 🌸\n\n"
+                    f"👤 **Added by:** [{message.from_user.first_name}](tg://user?id={message.from_user.id})\n"
+                    f"📺 **Anime:** `{user_data['anime']}`\n"
+                    f"👧 **Name:** `{user_data['name']}`\n"
+                    f"🆔 **Character ID:** `{waifu_id}`\n"
+                    f"🎖 **Rarity:** `{user_data['rarity']}`"
+                )
+
+                # Sending to CHARACTERS and SUPPORT groups
+                if media_type == "image":
+                    await app.send_photo(chat_id=CHARA_CHANNEL_ID, photo=media_url, caption=waifu_caption)
+                    await app.send_photo(chat_id=SUPPORT_CHAT, photo=media_url, caption=waifu_caption)
+                elif media_type == "video":
+                    await app.send_video(chat_id=CHARA_CHANNEL_ID, video=media_url, caption=waifu_caption)
+                    await app.send_video(chat_id=SUPPORT_CHAT, video=media_url, caption=waifu_caption)
+
+                await message.reply_text("✅ **Waifu successfully added to the collection!** 🎉")
+                user_states.pop(message.from_user.id, None)
+
+            elif user_data["state"] == "changing_media" and user_data["waifu_id"]:
+                # Handling media update for existing waifu
+                waifu_id = user_data["waifu_id"]
+                
+                update_data = {}
+                if media_type == "image":
+                    update_data["img_url"] = media_url
+                elif media_type == "video":
+                    update_data["video_url"] = media_url
+
+                waifu = await collection.find_one_and_update(
+                    {"id": waifu_id},
+                    {"$set": update_data},
+                    return_document=ReturnDocument.AFTER
+                )
+
+                if waifu:
+                    await message.reply_text("✅ **Character media updated successfully!** 🖼️🎥")
+                    
+                    change_caption = (
+                        f"🔄 **Waifu Media Updated!** 🔄\n\n"
+                        f"👤 **Updated by:** [{message.from_user.first_name}](tg://user?id={message.from_user.id})\n"
+                        f"👧 **Character:** `{waifu.get('name', 'Unknown')}`"
+                    )
+
+                    # Sending updated media
+                    if media_type == "image":
+                        await app.send_photo(chat_id=CHARA_CHANNEL_ID, photo=media_url, caption=change_caption)
+                        await app.send_photo(chat_id=SUPPORT_CHAT, photo=media_url, caption=change_caption)
+                    elif media_type == "video":
+                        await app.send_video(chat_id=CHARA_CHANNEL_ID, video=media_url, caption=change_caption)
+                        await app.send_video(chat_id=SUPPORT_CHAT, video=media_url, caption=change_caption)
+                else:
+                    await message.reply_text("❌ **Failed to update waifu media.** Please try again.")
+
+                user_states.pop(message.from_user.id, None)
+
+    except Exception as e:
+        await message.reply_text("⚠️ **An error occurred while processing your request.** Please try again later.")
+        print(f"Error in receive_media: {str(e)}")
+
+@app.on_inline_query(uploader_filter)
+async def search_anime(client, inline_query):
+    query = inline_query.query.strip().lower()
+    
+    if query.startswith("choose_anime "):
+        query = query[len("choose_anime "):]
+
+        anime_results = await collection.aggregate([
+            {"$match": {"anime": {"$regex": query, "$options": "i"}}},
+            {"$group": {"_id": "$anime", "waifu_count": {"$sum": 1}}},
+            {"$limit": 10}
+        ]).to_list(length=None)
+
+        results = []
+
+        if not anime_results:
+            results.append(
+                InlineQueryResultArticle(
+                    title="❌ No Anime Found",
+                    description="Try searching with a different name.",
+                    input_message_content=InputTextMessageContent(
+                        "⚠️ No matching anime found! Try using a different keyword."
+                    )
+                )
+            )
+        else:
+            for anime in anime_results:
+                title = anime["_id"]
+                waifu_count = anime["waifu_count"]
+                description = f"👧 **Waifus Available:** {waifu_count} waifus"
+                message_text = (
+                    f"📺 **Anime Title:** `{title}`\n"
+                    f"👧 **Total Characters:** `{waifu_count}`\n\n"
+                    f"🔹 You can add, rename, remove, or view characters from this anime."
+                )
+                
+                title_encoded = title[:30]  # Truncate for callback safety
+
+                inline_buttons = [
+                    [InlineKeyboardButton("📜 View Characters", switch_inline_query_current_chat=f"view_chars {title}")],
+                    [InlineKeyboardButton("➕ Add Waifu", callback_data=f"add_waifu_{title_encoded}")],
+                    [InlineKeyboardButton("✏ Rename Anime", callback_data=f"rename_anime_{title_encoded}")],
+                    [InlineKeyboardButton("🗑 Remove Anime", callback_data=f"remove_anime_{title_encoded}")]
+                ]
+                reply_markup = InlineKeyboardMarkup(inline_buttons)
+
+                results.append(
+                    InlineQueryResultArticle(
+                        title=title,
+                        description=description,
+                        input_message_content=InputTextMessageContent(message_text),
+                        reply_markup=reply_markup
+                    )
+                )
+
+        await inline_query.answer(results, cache_time=1)
+
+@app.on_inline_query(uploader_filter)
+async def search_characters(client, inline_query):
+    query = inline_query.query.strip()
+
+    if query.startswith("view_chars "):
+        anime_title = query[len("view_chars "):]
+
+        # Fetch characters from database
+        character_results = await collection.find(
+            {"anime": anime_title}, {"_id": 0, "character": 1, "rarity": 1, "image": 1}
+        ).to_list(length=50)  # Fetch up to 50 characters
+
+        results = []
+
+        if not character_results:
+            results.append(
+                InlineQueryResultArticle(
+                    title="❌ No Characters Found",
+                    description=f"No characters available for {anime_title}.",
+                    input_message_content=InputTextMessageContent(
+                        f"⚠️ No characters found for `{anime_title}`. Try adding some first!"
+                    )
+                )
+            )
+        else:
+            for char in character_results:
+                char_name = char["character"]
+                rarity = char["rarity"]
+                image_url = char.get("image", None)  # Get image if available
+
+                description = f"⭐ Rarity: {rarity}"
+                message_text = (
+                    f"📜 **Character Name:** `{char_name}`\n"
+                    f"📺 **Anime:** `{anime_title}`\n"
+                    f"⭐ **Rarity:** `{rarity}`\n\n"
+                    f"🔹 Manage this character from the main menu."
+                )
+
+                if image_url:
+                    results.append(
+                        InlineQueryResultPhoto(
+                            photo_url=image_url,
+                            thumb_url=image_url,  # Thumbnail same as main image
+                            title=char_name,
+                            description=description,
+                            caption=message_text
+                        )
+                    )
+                else:
+                    results.append(
+                        InlineQueryResultArticle(
+                            title=char_name,
+                            description=description,
+                            input_message_content=InputTextMessageContent(message_text)
+                        )
+                    )
+
+        await inline_query.answer(results, cache_time=1)
+
+
+@app.on_message(filters.private & filters.text)
+async def receive_text_message(client, message):
+    user_data = user_states.get(message.from_user.id)
+
+    if not user_data:
+        return  # Ignore messages from users not in an active session
+
+    user_id = message.from_user.id
+    first_name = message.from_user.first_name
+    user_mention = f"<a href='tg://user?id={user_id}'>{first_name}</a>"
+    user_input = message.text.strip()
+
+    if user_data["state"] == "awaiting_waifu_name" and user_data["anime"]:
+        # Handling new waifu name input
+        user_states[user_id]["name"] = user_input
+        user_states[user_id]["state"] = "awaiting_waifu_rarity"
+        
+        await message.reply_text(
+            f"🌟 **Great Choice!**\n\n"
+            f"Now, choose a **rarity level** for **{user_input}**:",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton(f" {rarity} ", callback_data=f"select_rarity_{rarity}")]
+                    for rarity in rarity_emojis.keys()
+                ]
+            )
+        )
+
+    elif user_data["state"] == "adding_anime":
+        # Handling new anime addition
+        existing_anime = await collection.find_one({"anime": user_input})
+        
+        if existing_anime:
+            await message.reply_text(f"⚠️ The anime **'{user_input}'** already exists!")
+        else:
+            anime_document = {"anime": user_input}
+            await collection.insert_one(anime_document)
+            await message.reply_text(f"✅ **'{user_input}'** has been added to the anime list!")
+
+            # Enhanced Notification Format with User Mention
+            announcement_text = (
+                f"✨ ** #New Anime Added!** ✨\n\n"
+                f"📺 **Title:** `{user_input}`\n"
+                f"👤 **Added by:** {user_mention}\n"
+            )
+
+            # Send announcement to Chara Channel and Support Chat
+            await app.send_message(CHARA_CHANNEL_ID, announcement_text)
+            await app.send_message(SUPPORT_CHAT, announcement_text)
+
+        user_states.pop(user_id, None)
+
+    elif user_data["state"] == "renaming_anime" and user_data["anime"]:
+        # Handling anime renaming
+        old_anime_name = user_data["anime"]
+        await collection.update_many({"anime": old_anime_name}, {"$set": {"anime": user_input}})
+
+        notification_text = (
+            f"📢 **Anime Renamed!**\n\n"
+            f"🔄 **Old Name:** `{old_anime_name}`\n"
+            f"✨ **New Name:** `{user_input}`\n"
+            f"👤 **Renamed by:** {user_mention}"
+        )
+
+        await message.reply_text(f"✅ **'{old_anime_name}'** has been renamed to **'{user_input}'**!")
+        await app.send_message(CHARA_CHANNEL_ID, f"🔔 #𝗥𝗘𝗡𝗔𝗠𝗘𝗔𝗡𝗜𝗠𝗘\n\n{notification_text}")
+        await app.send_message(SUPPORT_CHAT, f"🔔 #𝗥𝗘𝗡𝗔𝗠𝗘𝗔𝗡𝗜𝗠𝗘\n\n{notification_text}")
+
+        user_states.pop(user_id, None)
+
+    elif user_data["state"] == "renaming_waifu" and user_data["waifu_id"]:
+        # Handling waifu renaming
+        waifu_id = user_data["waifu_id"]
+        waifu = await collection.find_one({"id": waifu_id})
+
+        if waifu:
+            old_name = waifu["name"]
+            await collection.update_one({"id": waifu_id}, {"$set": {"name": user_input}})
+
+            # Select media (video if available, otherwise image)
+            media = waifu.get("video_url") or waifu.get("img_url")
+            send_media = app.send_video if "video_url" in waifu else app.send_photo
+
+            notification_text = (
+                f"📢 **Waifu Renamed!**\n\n"
+                f"🔄 **Old Name:** `{old_name}`\n"
+                f"✨ **New Name:** `{user_input}`\n"
+                f"👤 **Renamed by:** {user_mention}"
+            )
+
+            await message.reply_text(f"✅ **{old_name}** has been renamed to **{user_input}**!")
+
+            # Send update to Chara Channel & Support Chat
+            await send_media(
+                chat_id=CHARA_CHANNEL_ID,
+                video=media if "video_url" in waifu else None,
+                photo=media if "img_url" in waifu else None,
+                caption=f"🔔 #𝗖𝗛𝗔𝗡𝗚𝗘𝗗𝗡𝗔𝗠𝗘\n\n{notification_text}"
+            )
+            await send_media(
+                chat_id=SUPPORT_CHAT,
+                video=media if "video_url" in waifu else None,
+                photo=media if "img_url" in waifu else None,
+                caption=f"🔔 #𝗖𝗛𝗔𝗡𝗚𝗘𝗗𝗡𝗔𝗠𝗘\n\n{notification_text}"
+            )
+        else:
+            await message.reply_text("❌ **Failed to rename the waifu.** Please try again.")
+        
+        user_states.pop(user_id, None)
+
+@app.on_callback_query(filters.regex(r'^add_waifu_'))
+async def choose_anime_callback(client: Client, callback_query: CallbackQuery):
+    """Handles waifu addition by prompting the user to enter a character name."""
+    selected_anime = callback_query.data.split('_', 2)[-1]
+    user_id = callback_query.from_user.id
+
+    # Store user state
+    user_states[user_id] = {
+        "state": "awaiting_waifu_name",
+        "anime": selected_anime,
+        "name": None,
+        "rarity": None
+    }
+
+    # Check if the message exists before editing
+    if callback_query.message:
+        await callback_query.message.edit_text(
+            f"🎬 **Anime Selected:** `{selected_anime}`\n\n"
+            "🖊 **Now, please enter the new character's name:**",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancel", callback_data="cancel_add_waifu")]
+            ])
+        )
+    else:
+        # If message is None, send a new message instead
+        await callback_query.answer("🎬 Anime Selected! Now, send the character's name.", show_alert=True)
+
+
+@app.on_callback_query(filters.regex(r'^add_anime$'))
+async def add_anime_callback(client, callback_query):
+    """Prompts the user to enter a new anime name."""
+    user_id = callback_query.from_user.id
+
+    user_states[user_id] = {"state": "adding_anime"}
+
+    await callback_query.message.edit_text(
+        "📺 **Adding a New Anime**\n\n"
+        "🎭 Please enter the **name of the anime** you want to add:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel", callback_data="cancel_add_waifu")]
+        ])
+    )
+
+
+@app.on_callback_query(filters.regex(r'^cancel_add_waifu$'))
+async def cancel_add_waifu_callback(client, callback_query):
+    """Cancels the waifu/anime addition process and clears user state."""
+    user_states.pop(callback_query.from_user.id, None)
+
+    await callback_query.message.edit_text(
+        "🚫 **Operation Canceled**\n\n"
+        "You can start over anytime!"
+    )
+
+
+@app.on_callback_query(filters.regex(r'^rename_anime_'))
+async def rename_anime_callback(client: Client, callback_query: CallbackQuery):
+    """Handles renaming an anime by prompting the user for a new name."""
+    selected_anime = callback_query.data.split('_', 2)[-1]
+    user_id = callback_query.from_user.id
+
+    user_states[user_id] = {
+        "state": "renaming_anime",
+        "anime": selected_anime
+    }
+
+    # Check if the message exists before editing
+    if callback_query.message:
+        await callback_query.message.edit_text(
+            f"✏ **Rename Anime**\n\n"
+            f"🎬 Selected: `{selected_anime}`\n\n"
+            "🔄 Please enter the **new name** for this anime:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancel", callback_data="cancel_add_waifu")]
+            ])
+        )
+    else:
+        # If message is missing, notify the user with an alert
+        await callback_query.answer("Done ✅", show_alert=True)
+    
+
+@app.on_callback_query(filters.regex(r'^remove_anime_'))
+async def remove_anime_callback(client: Client, callback_query: CallbackQuery):
+    """Prompts the user for confirmation before deleting an anime."""
+    selected_anime = callback_query.data.split('_', 2)[-1]
+    user_id = callback_query.from_user.id
+
+    user_states[user_id] = {"state": "confirming_removal", "anime": selected_anime}
+
+    # Check if the message exists before trying to edit
+    if callback_query.message:
+        await callback_query.message.edit_text(
+            f"⚠️ **Confirm Deletion**\n\n"
+            f"📺 Anime: `{selected_anime}`\n\n"
+            "🚨 Are you **sure** you want to delete this anime?\n"
+            "⚠️ *This action cannot be undone!*",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Yes, Delete", callback_data="confirm_remove_anime")],
+                [InlineKeyboardButton("❌ No, Cancel", callback_data="cancel_remove_anime")]
+            ])
+        )
+    else:
+        # If message is None, show an alert instead
+        await callback_query.answer("Done ✅", show_alert=True)
+
+@app.on_callback_query(filters.regex(r'^confirm_remove_anime$'))
+async def confirm_remove_anime_callback(client, callback_query):
+    """Deletes the selected anime and notifies relevant channels."""
+    user_data = user_states.get(callback_query.from_user.id)
+    
+    if user_data and user_data.get("state") == "confirming_removal":
+        selected_anime = user_data["anime"]
+        await collection.delete_many({"anime": selected_anime})
+
+        await callback_query.message.edit_text(
+            f"✅ **Anime Deleted Successfully**\n\n"
+            f"📺 `{selected_anime}` has been **removed** from the database."
+        )
+
+        # Notify Admin Channels
+        notification_text = f"📢 **Admin Notice**\n\n🗑 Anime **'{selected_anime}'** has been removed!"
+        await app.send_message(CHARA_CHANNEL_ID, notification_text)
+        await app.send_message(SUPPORT_CHAT, notification_text)
+
+        user_states.pop(callback_query.from_user.id, None)
+
+
+@app.on_callback_query(filters.regex(r'^cancel_remove_anime$'))
+async def cancel_remove_anime_callback(client, callback_query):
+    """Cancels the anime deletion process and restores the previous message."""
+    user_states.pop(callback_query.from_user.id, None)
+
+    await callback_query.message.edit_text(
+        "🚫 **Operation Canceled**\n\n"
+        "📺 Anime removal request has been canceled. No changes were made."
+    )
+
+
+@app.on_callback_query(filters.regex(r'^rename_waifu_'))
+async def rename_waifu_callback(client, callback_query):
+    """Prompts the user to enter a new name for the selected waifu."""
+    waifu_id = callback_query.data.split('_', 2)[-1]
+    user_id = callback_query.from_user.id
+
+    user_states[user_id] = {"state": "renaming_waifu", "waifu_id": waifu_id}
+
+    await callback_query.message.edit_text(
+        f"✏ **Rename Character**\n\n"
+        f"🆔 Character ID: `{waifu_id}`\n\n"
+        "🖊 **Enter the new name for this character:**",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel", callback_data="cancel_add_waifu")]
+        ])
+    )
+
+@app.on_callback_query(filters.regex(r'^change_image_'))
+async def change_image_callback(client, callback_query):
+    """Handles the change of waifu image process."""
+    waifu_id = callback_query.data.split('_', 2)[-1]
+    user_states[callback_query.from_user.id] = {"state": "changing_image", "waifu_id": waifu_id}
+
+    # User feedback and cancel option
+    await callback_query.message.edit_text(
+        f"📸 **Change Image**\n\n"
+        f"You've selected **Character ID: {waifu_id}**. Please upload the new image for this character.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel", callback_data="cancel_change_image")]
+        ])
+    )
+
+
+@app.on_callback_query(filters.regex(r'^cancel_change_image$'))
+async def cancel_change_image_callback(client, callback_query):
+    """Cancels the change image operation."""
+    user_states.pop(callback_query.from_user.id, None)
+    await callback_query.message.edit_text("🚫 **Operation canceled successfully.**")
+
+
+@app.on_callback_query(filters.regex(r'^change_rarity_'))
+async def change_rarity_callback(client, callback_query):
+    """Allows the user to change the rarity of a waifu."""
+    try:
+        _, waifu_id = callback_query.data.rsplit('_', 1)
+
+        # Get available rarities and provide a dropdown
+        rarity_keyboard = [
+            [InlineKeyboardButton(f" {rarity}", callback_data=f"set_rarity_{rarity}_{waifu_id}")]
+            for rarity, emoji in rarity_emojis.items()
+        ]
+        await callback_query.message.edit_text(
+            f"✨ **Choose a New Rarity** for Waifu ID: `{waifu_id}`:",
+            reply_markup=InlineKeyboardMarkup(rarity_keyboard)
+        )
+    except Exception as e:
+        await callback_query.answer("⚠️ **An error occurred.** Please try again.", show_alert=True)
+        print(f"Error in change_rarity_callback: {str(e)}")
+
+
+@app.on_callback_query(filters.regex(r'^set_rarity_'))
+async def set_rarity_callback(client, callback_query):
+    """Updates the rarity of a selected waifu."""
+    try:
+        _, new_rarity, waifu_id = callback_query.data.rsplit('_', 2)
+
+        waifu = await collection.find_one({"id": waifu_id})
+        if not waifu:
+            await callback_query.answer("❌ **Waifu not found.** Please try again.", show_alert=True)
+            return
+
+        old_rarity = waifu["rarity"]
+        await collection.update_one({"id": waifu_id}, {"$set": {"rarity": new_rarity}})
+
+        updated_waifu = await collection.find_one({"id": waifu_id})
+
+        # Select media (video if available, otherwise image)
+        media = updated_waifu.get("video_url") or updated_waifu.get("img_url")
+        send_media = app.send_video if "video_url" in updated_waifu else app.send_photo
+
+        # Prepare update message
+        update_message = (
+            f"✨ **Rarity Updated!**\n"
+            f"👧 **Waifu:** `{updated_waifu['name']}`\n"
+            f"🔄 **Old Rarity:** `{old_rarity}`\n"
+            f"🌟 **New Rarity:** `{new_rarity}`"
+        )
+
+        # Send update to user
+        await send_media(
+            chat_id=callback_query.from_user.id,
+            video=media if "video_url" in updated_waifu else None,
+            photo=media if "img_url" in updated_waifu else None,
+            caption=update_message
+        )
+
+        # Notify Admin/Support Channels
+        await send_media(
+            chat_id=CHARA_CHANNEL_ID,
+            video=media if "video_url" in updated_waifu else None,
+            photo=media if "img_url" in updated_waifu else None,
+            caption=update_message
+        )
+        await send_media(
+            chat_id=SUPPORT_CHAT,
+            video=media if "video_url" in updated_waifu else None,
+            photo=media if "img_url" in updated_waifu else None,
+            caption=update_message
+        )
+
+        await callback_query.message.edit_text(f"✅ **Rarity successfully updated** to `{new_rarity}`.")
+    except Exception as e:
+        await callback_query.answer("⚠️ **An error occurred.** Please try again.", show_alert=True)
+        print(f"Error in set_rarity_callback: {str(e)}")
+
+@app.on_callback_query(filters.regex(r'^destroy_waifu_'))
+async def destroy_waifu_callback(client, callback_query):
+    """Destroys a waifu permanently without confirmation."""
+    waifu_id = callback_query.data.split('_', 2)[-1]
+
+    try:
+        # Fetch waifu details
+        waifu = await collection.find_one_and_delete({"id": waifu_id})
+
+        if waifu:
+            # Remove from everyone's harem
+            await collection.update_many({}, {"$pull": {"harem": waifu_id}})
+
+            # Choose whether to send image or video
+            media = waifu.get("video_url") or waifu.get("img_url")
+            send_media = app.send_video if "video_url" in waifu else app.send_photo
+
+            # Inform the user and admin channels
+            await callback_query.message.edit_text(
+                f"✅ **Waifu ID `{waifu_id}` has been permanently destroyed.**"
+            )
+            await send_media(
+                chat_id=CHARA_CHANNEL_ID,
+                video=media if "video_url" in waifu else None,
+                photo=media if "img_url" in waifu else None,
+                caption=f"⚰️ **Waifu Destroyed**: <a href='tg://user?id={callback_query.from_user.id}'>{callback_query.from_user.first_name}</a> has permanently destroyed character **'{waifu['name']}'**."
+            )
+            await send_media(
+                chat_id=SUPPORT_CHAT,
+                video=media if "video_url" in waifu else None,
+                photo=media if "img_url" in waifu else None,
+                caption=f"⚰️ **Waifu Destroyed**: <a href='tg://user?id={callback_query.from_user.id}'>{callback_query.from_user.first_name}</a> has permanently destroyed character **'{waifu['name']}'**."
+            )
+        else:
+            await callback_query.message.edit_text("❌ **Waifu not found. Please try again.**")
+    except Exception as e:
+        await callback_query.message.edit_text(f"⚠️ **An error occurred while destroying the waifu**: {str(e)}")
+        print(f"Error in destroy: {e}")
+
+
+@app.on_callback_query(filters.regex(r'^delete_waifu_\d+$'))
+async def delete_waifu_callback(client, callback_query):
+    """Deletes a waifu permanently without confirmation."""
+    try:
+        waifu_id = callback_query.data.split('_')[-1]
+
+        # Fetch waifu details
+        waifu = await collection.find_one_and_delete({"id": waifu_id})
+
+        if waifu:
+            # Choose whether to send image or video
+            media = waifu.get("video_url") or waifu.get("img_url")
+            send_media = app.send_video if "video_url" in waifu else app.send_photo
+
+            # Notify the user of the successful deletion
+            await callback_query.message.edit_text(f"✅ **Waifu ID `{waifu_id}` has been deleted successfully.**")
+
+            # Send notification to admin/support channels
+            await send_media(
+                chat_id=CHARA_CHANNEL_ID,
+                video=media if "video_url" in waifu else None,
+                photo=media if "img_url" in waifu else None,
+                caption=f"📢 **Waifu Deleted**: The sudo user deleted character **'{waifu['name']}'**."
+            )
+            await send_media(
+                chat_id=SUPPORT_CHAT,
+                video=media if "video_url" in waifu else None,
+                photo=media if "img_url" in waifu else None,
+                caption=f"📢 **Waifu Deleted**: The sudo user deleted character **'{waifu['name']}'**."
+            )
+        else:
+            await callback_query.message.edit_text("❌ **Failed to delete the waifu. Please try again.**")
+    except Exception as e:
+        print(f"Error in delete: {e}")
+        await callback_query.answer("❌ An error occurred while deleting the waifu.", show_alert=True)
+
+@app.on_callback_query(filters.regex('^change_video_'))
+async def change_video_callback(client, callback_query):
+    waifu_id = callback_query.data.split("_")[-1]
+    
+    # Check if waifu exists
+    waifu = await collection.find_one({"id": waifu_id})
+    if not waifu:
+        await callback_query.answer("❌ Waifu not found!", show_alert=True)
+        return
+
+    user_states[callback_query.from_user.id] = {
+        "state": "changing_media",
+        "waifu_id": waifu_id
+    }
+
+    await callback_query.message.edit_text(
+        "🎥 **Updating Waifu Video**\n\n"
+        "📌 Please send the new **video** for this waifu.\n"
+        "Make sure it's a high-quality video that represents her well. ✨",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("❌ Cancel Update", callback_data="cancel_update")]]
+        )
+    )
+
+@app.on_callback_query(filters.regex("^cancel_update$"))
+async def cancel_update_callback(client, callback_query):
+    """Handles waifu video update cancellation."""
+    
+    user_id = callback_query.from_user.id
+
+    # Check if the user was in an active update session
+    if user_id in user_states and user_states[user_id].get("state") == "changing_media":
+        del user_states[user_id]  # Remove user state
+    
+    await callback_query.message.edit_text("❌ **Update Cancelled.**\nNo changes were made.")

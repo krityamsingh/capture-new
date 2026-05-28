@@ -1,0 +1,612 @@
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from datetime import datetime, timedelta
+import random
+import asyncio
+from collections import defaultdict
+import string
+import nltk
+from nltk.corpus import words
+from . import app, user_collection, ac, collection
+
+# Download NLTK words corpus if not already present
+try:
+    nltk.data.find('corpora/words')
+except LookupError:
+    nltk.download('words')
+
+# Initialize word dictionary
+word_dictionary = defaultdict(list)
+all_words = {word.lower() for word in words.words() if word.isalpha()}
+
+for word in all_words:
+    if 2 <= len(word) <= 10:  # Now includes 2-letter words
+        word_dictionary[len(word)].append(word)
+
+# Game settings
+GAME_MODES = {
+    "classic": {
+        "name": "Classic",
+        "description": "Standard chain game with normal rules",
+        "time_limit": 30,
+        "min_letters": 2,  # Changed from 3 to 2
+        "max_letters": 5,
+        "xp_multiplier": 1.0,
+        "letter_increase_chance": 0.3
+    },
+    "hard": {
+        "name": "Hard",
+        "description": "Challenging mode with shorter time limits",
+        "time_limit": 20,
+        "min_letters": 3,
+        "max_letters": 6,
+        "xp_multiplier": 1.5,
+        "letter_increase_chance": 0.4
+    },
+    "extreme": {
+        "name": "Extreme",
+        "description": "Very difficult mode for expert players",
+        "time_limit": 15,
+        "min_letters": 4,
+        "max_letters": 7,
+        "xp_multiplier": 2.0,
+        "letter_increase_chance": 0.5
+    }
+}
+
+RARITIES = {
+    '⚫ Common': '⚫',
+    '🔮 Limited Edition': '🔮',
+    '🫧 Premium': '🫧',
+    '💮 Mythic': '💮',
+    '🔱 Godly': '🔱',
+    '🟡 Legendary': '🟡',
+    '🟣 Epic': '🟣',
+    '🟠 Rare': '🟠',
+    '🟤 Uncommon': '🟤',
+    '🏵️ Exotic': '🏵️',
+    '⚜️ Unique': '⚜️'
+}
+
+# Active games storage
+active_games = {}  # chat_id: game_data
+player_timers = {}  # chat_id: timer_task
+
+# Tiny font converter
+tiny_font = {
+    'a': 'ᴀ', 'b': 'ʙ', 'c': 'ᴄ', 'd': 'ᴅ', 'e': 'ᴇ', 'f': 'ғ', 'g': 'ɢ',
+    'h': 'ʜ', 'i': 'ɪ', 'j': 'ᴊ', 'k': 'ᴋ', 'l': 'ʟ', 'm': 'ᴍ', 'n': 'ɴ',
+    'o': 'ᴏ', 'p': 'ᴘ', 'q': 'ǫ', 'r': 'ʀ', 's': 's', 't': 'ᴛ', 'u': 'ᴜ',
+    'v': 'ᴠ', 'w': 'ᴡ', 'x': 'x', 'y': 'ʏ', 'z': 'ᴢ',
+    ' ': ' ', '!': '!', '?': '?', '.': '.', ':': ':', '(': '(', ')': ')'
+}
+
+def convert_to_tiny(text):
+    return ''.join(tiny_font.get(c.lower(), c) for c in text)
+
+async def start_new_game(chat_id: int, mode: str = "classic"):
+    if chat_id in active_games:
+        return False
+    
+    game_data = {
+        "mode": mode,
+        "players": [],
+        "joined_players": [],
+        "status": "waiting",
+        "current_letter": "",
+        "current_length": GAME_MODES[mode]["min_letters"],
+        "used_words": set(),
+        "turn_index": 0,
+        "start_time": None,
+        "creator": None,
+        "timer": None,
+        "settings": GAME_MODES[mode],
+        "message_id": None
+    }
+    
+    active_games[chat_id] = game_data
+    return True
+
+async def start_game_countdown(chat_id: int):
+    game = active_games.get(chat_id)
+    if not game or game["status"] != "waiting":
+        return
+    
+    await asyncio.sleep(60)
+    
+    game = active_games.get(chat_id)
+    if not game or game["status"] != "waiting":
+        return
+    
+    if len(game["joined_players"]) < 2:
+        await end_game(chat_id, "❌ Not enough players joined. Game cancelled.")
+        return
+    
+    await begin_game_play(chat_id)
+
+async def begin_game_play(chat_id: int):
+    game = active_games.get(chat_id)
+    if not game:
+        return
+    
+    game["status"] = "playing"
+    game["start_time"] = datetime.now()
+    game["current_letter"] = random.choice(string.ascii_lowercase)
+    game["turn_index"] = 0
+    
+    players = game["joined_players"]
+    random.shuffle(players)
+    game["joined_players"] = players
+    
+    msg = await send_game_update(
+        chat_id,
+        f"🎮 **Game Started!**\n\n"
+        f"🔤 First letter: `{game['current_letter'].upper()}`\n"
+        f"📏 Word length: `{game['current_length']}` letters\n"
+        f"⏱ Time limit: `{game['settings']['time_limit']}` seconds\n\n"
+        f"👤 Current turn: {players[0]['mention']}"
+    )
+    
+    if msg:
+        game["message_id"] = msg.id
+    
+    # Start the timer for the first player
+    await start_player_timer(chat_id)
+
+async def start_player_timer(chat_id: int):
+    game = active_games.get(chat_id)
+    if not game or game["status"] != "playing":
+        return
+    
+    # Cancel any existing timer
+    if chat_id in player_timers:
+        player_timers[chat_id].cancel()
+    
+    # Start new timer
+    player_timers[chat_id] = asyncio.create_task(
+        player_turn_timeout(chat_id, game["settings"]["time_limit"])
+    )
+
+async def player_turn_timeout(chat_id: int, timeout: int):
+    await asyncio.sleep(timeout)
+    
+    game = active_games.get(chat_id)
+    if not game or game["status"] != "playing":
+        return
+    
+    players = game["joined_players"]
+    if not players:
+        return
+    
+    current_player = players[game["turn_index"]]
+    
+    # Eliminate player who didn't respond in time
+    eliminated_player = players.pop(game["turn_index"])
+    await app.send_message(
+        chat_id,
+        f"⏰ Time's up! {eliminated_player['mention']} was eliminated!"
+    )
+    
+    # Update user stats
+    await update_user_stats(eliminated_player["id"], "losses", 1)
+    
+    if len(players) == 1:
+        await end_game(chat_id)
+    else:
+        if game["turn_index"] >= len(players):
+            game["turn_index"] = 0
+        
+        await next_turn(chat_id)
+
+async def next_turn(chat_id: int):
+    game = active_games.get(chat_id)
+    if not game or game["status"] != "playing":
+        return
+    
+    players = game["joined_players"]
+    if not players:
+        await end_game(chat_id, "🏁 Game ended - all players eliminated!")
+        return
+    
+    current_player = players[game["turn_index"]]
+    
+    msg = await send_game_update(
+        chat_id,
+        f"👤 It's now {current_player['mention']}'s turn!\n"
+        f"🔤 Letter: `{game['current_letter'].upper()}`\n"
+        f"📏 Word length: `{game['current_length']}` letters\n"
+        f"⏱ You have {game['settings']['time_limit']} seconds!",
+        game.get("message_id")
+    )
+    
+    if msg:
+        game["message_id"] = msg.id
+    
+    await start_player_timer(chat_id)
+
+async def end_game(chat_id: int, message: str = None):
+    game = active_games.get(chat_id)
+    if not game:
+        return
+    
+    # Cancel any running timer
+    if chat_id in player_timers:
+        player_timers[chat_id].cancel()
+        del player_timers[chat_id]
+    
+    # Award the winner if there's only one player left
+    if game["status"] == "playing" and len(game["joined_players"]) == 1:
+        winner = game["joined_players"][0]
+        await award_winner(winner["id"], game["mode"])
+        
+        message = (message or "") + f"\n\n🏆 **Winner!** {winner['mention']} has won the game!\n" \
+                                   f"They received a random character as reward!"
+    
+    if message:
+        await app.send_message(chat_id, message)
+    
+    del active_games[chat_id]
+
+async def award_winner(user_id: int, mode: str):
+    rarity_weights = {
+        "classic": [0.4, 0.3, 0.15, 0.1, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "hard": [0.3, 0.25, 0.2, 0.15, 0.05, 0.03, 0.02, 0.0, 0.0, 0.0, 0.0],
+        "extreme": [0.2, 0.2, 0.15, 0.15, 0.1, 0.08, 0.07, 0.03, 0.02, 0.0, 0.0]
+    }
+    
+    rarity = random.choices(list(RARITIES.keys()), weights=rarity_weights[mode])[0]
+    
+    chars = await collection.find({"rarity": rarity}).to_list(None)
+    if not chars:
+        chars = await collection.find().to_list(None)
+    
+    if chars:
+        char = random.choice(chars)
+        await ac(user_id, char["id"])
+        
+        await update_user_stats(user_id, "wins", 1)
+        await update_user_stats(user_id, "characters_collected", 1)
+        await update_user_stats(user_id, f"{rarity.lower().replace(' ', '_')}_chars", 1)
+
+async def update_user_stats(user_id: int, stat: str, value: int = 1):
+    await user_collection.update_one(
+        {"user_id": user_id},
+        {"$inc": {f"stats.{stat}": value}},
+        upsert=True
+    )
+
+async def send_game_update(chat_id: int, message: str, reply_to_message_id: int = None):
+    game = active_games.get(chat_id)
+    if not game:
+        return None
+    
+    players_list = "\n".join([
+        f"{i+1}. {p['mention']} ({p.get('score', 0)} pts)"
+        for i, p in enumerate(game["joined_players"])
+    ])
+    
+    full_message = f"{message}\n\n🏆 **Players:**\n{players_list}"
+    
+    try:
+        if reply_to_message_id:
+            return await app.send_message(
+                chat_id,
+                full_message,
+                reply_to_message_id=reply_to_message_id
+            )
+        else:
+            return await app.send_message(chat_id, full_message)
+    except Exception:
+        return await app.send_message(chat_id, full_message)
+
+@app.on_message(filters.command(["startgame", "startclassic", "starthard", "startextreme"]))
+async def start_game_handler(client: Client, message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    user_mention = message.from_user.mention
+    
+    mode = "classic"
+    if message.command[0] == "startclassic":
+        mode = "classic"
+    elif message.command[0] == "starthard":
+        mode = "hard"
+    elif message.command[0] == "startextreme":
+        mode = "extreme"
+    
+    if chat_id in active_games:
+        await message.reply_text(convert_to_tiny("⚠️ A game is already running in this chat!"))
+        return
+    
+    if not await start_new_game(chat_id, mode):
+        return
+    
+    active_games[chat_id]["creator"] = user_id
+    mode_info = GAME_MODES[mode]
+    
+    msg = await message.reply_text(
+        f"🎮 **New {mode_info['name']} Chain Game Started!**\n\n"
+        f"Hosted by: {user_mention}\n"
+        f"Mode: {mode_info['description']}\n"
+        f"Time limit: {mode_info['time_limit']} seconds per turn\n"
+        f"Starting word length: {mode_info['min_letters']} letters\n\n"
+        f"Type /joingame to participate!\n"
+        f"The game will start in 1 minute or when /forcestart is used.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Join Game", callback_data=f"join_{chat_id}")]
+        ])
+    )
+    
+    active_games[chat_id]["message_id"] = msg.id
+    asyncio.create_task(start_game_countdown(chat_id))
+
+@app.on_message(filters.command(["joingame", "join"]))
+async def join_game_handler(client: Client, message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    user_mention = message.from_user.mention
+    
+    game = active_games.get(chat_id)
+    if not game or game["status"] != "waiting":
+        await message.reply_text(convert_to_tiny("⚠️ No game is currently waiting for players in this chat!"))
+        return
+    
+    if any(p["id"] == user_id for p in game["joined_players"]):
+        await message.reply_text(convert_to_tiny("⚠️ You've already joined this game!"))
+        return
+    
+    game["joined_players"].append({
+        "id": user_id,
+        "mention": user_mention,
+        "score": 0
+    })
+    
+    try:
+        await app.edit_message_text(
+            chat_id,
+            game["message_id"],
+            f"🎮 **New {GAME_MODES[game['mode']]['name']} Chain Game Started!**\n\n"
+            f"Hosted by: {game['joined_players'][0]['mention']}\n"
+            f"Mode: {GAME_MODES[game['mode']]['description']}\n"
+            f"Time limit: {GAME_MODES[game['mode']]['time_limit']} seconds per turn\n"
+            f"Starting word length: {GAME_MODES[game['mode']]['min_letters']} letters\n\n"
+            f"Players joined: {len(game['joined_players'])}\n"
+            f"The game will start in 1 minute or when /forcestart is used.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"Join Game ({len(game['joined_players'])})", callback_data=f"join_{chat_id}")]
+            ])
+        )
+    except Exception as e:
+        print(f"Error editing message: {e}")
+    
+    await message.reply_text(f"✅ {user_mention} has joined the game!")
+
+@app.on_message(filters.command("forcestart"))
+async def force_start_handler(client: Client, message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    game = active_games.get(chat_id)
+    if not game or game["status"] != "waiting":
+        await message.reply_text(convert_to_tiny("⚠️ No game is currently waiting for players in this chat!"))
+        return
+    
+    if user_id != game["creator"]:
+        await message.reply_text(convert_to_tiny("⚠️ Only the game host can force start the game!"))
+        return
+    
+    if len(game["joined_players"]) < 2:
+        await message.reply_text(convert_to_tiny("⚠️ Need at least 2 players to start the game!"))
+        return
+    
+    await begin_game_play(chat_id)
+
+@app.on_message(filters.command("cancelgame"))
+async def cancel_game_handler(client: Client, message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    game = active_games.get(chat_id)
+    if not game:
+        await message.reply_text(convert_to_tiny("⚠️ No active game in this chat!"))
+        return
+    
+    if user_id != game["creator"]:
+        await message.reply_text(convert_to_tiny("⚠️ Only the game host can cancel the game!"))
+        return
+    
+    await end_game(chat_id, "🚫 Game cancelled by host.")
+
+@app.on_message(filters.command("gameinfo"))
+async def game_info_handler(client: Client, message: Message):
+    chat_id = message.chat.id
+    
+    game = active_games.get(chat_id)
+    if not game:
+        await message.reply_text(convert_to_tiny("ℹ️ No active game in this chat."))
+        return
+    
+    mode_info = GAME_MODES[game["mode"]]
+    players_list = "\n".join([p["mention"] for p in game["joined_players"]])
+    
+    status = "Waiting for players" if game["status"] == "waiting" else "In progress"
+    
+    await message.reply_text(
+        f"🎮 **Game Information**\n\n"
+        f"🏷 Mode: {mode_info['name']}\n"
+        f"📝 Status: {status}\n"
+        f"⏱ Time limit: {mode_info['time_limit']}s\n"
+        f"🔤 Current letter: {game['current_letter'].upper() if game['current_letter'] else 'Not started'}\n"
+        f"📏 Current length: {game['current_length']} letters\n\n"
+        f"👥 Players ({len(game['joined_players'])}):\n{players_list}"
+    )
+
+def not_command(_, __, message):
+    return not message.text.startswith('/')
+
+@app.on_message(filters.text & filters.group)
+async def handle_player_move(client: Client, message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    text = message.text.lower().strip()
+    
+    game = active_games.get(chat_id)
+    if not game or game["status"] != "playing":
+        return
+    
+    players = game["joined_players"]
+    if not players or game["turn_index"] >= len(players):
+        return
+    
+    current_player = players[game["turn_index"]]
+    if current_player["id"] != user_id:
+        return
+    
+    # Validate the word
+    if not text.startswith(game["current_letter"]):
+        await message.reply_text(f"❌ {message.from_user.mention}, your word must start with '{game['current_letter'].upper()}'!")
+        return
+    
+    if len(text) != game["current_length"]:
+        await message.reply_text(f"❌ {message.from_user.mention}, your word must be exactly {game['current_length']} letters long!")
+        return
+    
+    if text in game["used_words"]:
+        await message.reply_text(f"❌ {message.from_user.mention}, this word has already been used!")
+        return
+    
+    if text not in word_dictionary[len(text)]:
+        await message.reply_text(f"❌ {message.from_user.mention}, this word doesn't exist in our dictionary!")
+        return
+    
+    # Valid word - update game state
+    game["used_words"].add(text)
+    game["current_letter"] = text[-1]
+    
+    # Increase word length occasionally
+    if (random.random() < game["settings"]["letter_increase_chance"] and 
+        game["current_length"] < game["settings"]["max_letters"]):
+        game["current_length"] += 1
+    
+    # Update player score
+    current_player["score"] += len(text) * 10
+    
+    # Update user stats
+    await update_user_stats(user_id, "words_played", 1)
+    await update_user_stats(user_id, "letters_played", len(text))
+    await track_word_stats(user_id, text)
+    
+    await message.reply_text(f"✅ {message.from_user.mention} played: `{text.upper()}`\n"
+                           f"Next letter: `{game['current_letter'].upper()}`")
+    
+    # Cancel current timer and move to next player
+    if chat_id in player_timers:
+        player_timers[chat_id].cancel()
+    
+    await next_turn(chat_id)
+
+async def track_word_stats(user_id: int, word: str):
+    user_stats = await user_collection.find_one({"user_id": user_id})
+    
+    if not user_stats or len(word) > len(user_stats.get("stats", {}).get("longest_word", "")):
+        await user_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"stats.longest_word": word}},
+            upsert=True
+        )
+    
+    if not user_stats or len(word) < len(user_stats.get("stats", {}).get("shortest_word", "zzzzzzzzzz")):
+        await user_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"stats.shortest_word": word}},
+            upsert=True
+        )
+
+@app.on_message(filters.command("mystats"))
+async def player_stats_handler(client: Client, message: Message):
+    user_id = message.from_user.id
+    user = message.from_user
+    
+    stats = await user_collection.find_one({"user_id": user_id})
+    if not stats:
+        stats = {"stats": {}}
+    
+    stat_data = stats.get("stats", {})
+    
+    # Calculate win rate
+    wins = stat_data.get("wins", 0)
+    losses = stat_data.get("losses", 0)
+    total_games = wins + losses
+    win_rate = (wins / total_games * 100) if total_games > 0 else 0
+    
+    # Prepare rarity counts
+    rarity_counts = []
+    for rarity in RARITIES:
+        key = rarity.lower().replace(' ', '_') + "_chars"
+        count = stat_data.get(key, 0)
+        if count > 0:
+            rarity_counts.append(f"{RARITIES[rarity]} {rarity.split()[0]}: {count}")
+    
+    # Create stats message
+    stats_msg = (
+        f"📊 **Player Stats for {user.first_name}**\n\n"
+        f"🏆 Wins: `{wins}`\n"
+        f"💔 Losses: `{losses}`\n"
+        f"📈 Win Rate: `{win_rate:.1f}%`\n"
+        f"🔤 Words Played: `{stat_data.get('words_played', 0)}`\n"
+        f"🔡 Letters Played: `{stat_data.get('letters_played', 0)}`\n"
+        f"📏 Longest Word: `{stat_data.get('longest_word', 'N/A')}`\n"
+        f"📐 Shortest Word: `{stat_data.get('shortest_word', 'N/A')}`\n\n"
+        f"🎖️ Characters Collected: `{stat_data.get('characters_collected', 0)}`\n"
+        f"{', '.join(rarity_counts) if rarity_counts else 'No characters collected yet'}"
+    )
+    
+    if user.photo:
+        try:
+            photo = await app.download_media(user.photo.big_file_id)
+            await message.reply_photo(photo, caption=stats_msg)
+            return
+        except Exception:
+            pass
+    
+    await message.reply_text(stats_msg)
+
+@app.on_callback_query(filters.regex(r"join_(\d+)"))
+async def join_button_handler(client: Client, callback_query):
+    chat_id = int(callback_query.data.split("_")[1])
+    user_id = callback_query.from_user.id
+    user_mention = callback_query.from_user.mention
+    
+    game = active_games.get(chat_id)
+    if not game or game["status"] != "waiting":
+        await callback_query.answer("No active game to join!", show_alert=True)
+        return
+    
+    if any(p["id"] == user_id for p in game["joined_players"]):
+        await callback_query.answer("You've already joined this game!", show_alert=True)
+        return
+    
+    game["joined_players"].append({
+        "id": user_id,
+        "mention": user_mention,
+        "score": 0
+    })
+    
+    try:
+        await app.edit_message_text(
+            chat_id,
+            game["message_id"],
+            f"🎮 **New {GAME_MODES[game['mode']]['name']} Chain Game Started!**\n\n"
+            f"Hosted by: {game['joined_players'][0]['mention']}\n"
+            f"Mode: {GAME_MODES[game['mode']]['description']}\n"
+            f"Time limit: {GAME_MODES[game['mode']]['time_limit']} seconds per turn\n"
+            f"Starting word length: {GAME_MODES[game['mode']]['min_letters']} letters\n\n"
+            f"Players joined: {len(game['joined_players'])}\n"
+            f"The game will start in 1 minute or when /forcestart is used.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"Join Game ({len(game['joined_players'])})", callback_data=f"join_{chat_id}")]
+            ])
+        )
+    except Exception:
+        pass
+    
+    await callback_query.answer(f"You've joined the game!", show_alert=True)

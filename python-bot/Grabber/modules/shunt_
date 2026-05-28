@@ -1,0 +1,153 @@
+import time
+import asyncio
+import random
+from pyrogram import filters, Client
+from pyrogram.errors import UserNotParticipant
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from motor.motor_asyncio import AsyncIOMotorClient
+from . import user_collection, app, dev_filter
+from .block import block_dec, temp_block
+
+MUST_JOIN = "main_dynamic"
+cooldown_duration_hunt = 60
+
+dungeons = [
+    {
+        "name": "Goblin Cave",
+        "rank": "F",
+        "image_url": "https://files.catbox.moe/bzohcw.jpg",
+        "win_chance": 85,
+        "gold_reward": (10, 50),
+        "xp_reward": (5, 20),
+        "special_drop": ["Goblin Dagger", "Healing Herb"],
+        "loss_message": "You lost 💀. The goblins overwhelmed you!"
+    },
+    {
+        "name": "Wolf Den",
+        "rank": "D",
+        "image_url": "https://files.catbox.moe/jn8f27.jpg",
+        "win_chance": 65,
+        "gold_reward": (20, 80),
+        "xp_reward": (10, 30),
+        "special_drop": ["Wolf Fang", "Silver Sword"],
+        "loss_message": "You lost 💀. The wolves tore you apart!"
+    },
+    {
+        "name": "Dragon Lair",
+        "rank": "S",
+        "image_url": "https://files.catbox.moe/ouz8eu.jpg",
+        "win_chance": 10,
+        "gold_reward": (100, 500),
+        "xp_reward": (50, 150),
+        "special_drop": ["Dragon Scale", "Legendary Sword", "Phoenix Feather"],
+        "loss_message": "You lost 💀. The dragon incinerated you with its fire!"
+    },
+    {
+        "name": "Dark Forest",
+        "rank": "C",
+        "image_url": "https://files.catbox.moe/cmflg9.jpg",
+        "win_chance": 75,
+        "gold_reward": (30, 100),
+        "xp_reward": (15, 40),
+        "special_drop": ["Mystic Leaf", "Dark Elixir"],
+        "loss_message": "You lost 💀. The cursed trees trapped you forever!"
+    },
+    {
+        "name": "Haunted Ruins",
+        "rank": "B",
+        "image_url": "https://files.catbox.moe/2m06k2.jpg",
+        "win_chance": 50,
+        "gold_reward": (50, 150),
+        "xp_reward": (20, 60),
+        "special_drop": ["Ghostly Essence", "Ancient Relic"],
+        "loss_message": "You lost 💀. The spirits drained your soul!"
+    },
+    {
+        "name": "Ancient Temple",
+        "rank": "A",
+        "image_url": "https://files.catbox.moe/83y6f9.jpg",
+        "win_chance": 30,
+        "gold_reward": (80, 250),
+        "xp_reward": (30, 90),
+        "special_drop": ["Sacred Amulet", "Cursed Scroll"],
+        "loss_message": "You lost 💀. The temple guardians crushed you!"
+    },
+    {
+        "name": "Demon Abyss",
+        "rank": "SS",
+        "image_url": "https://files.catbox.moe/2lxb67.jpg",
+        "win_chance": 5,
+        "gold_reward": (200, 1000),
+        "xp_reward": (100, 300),
+        "special_drop": ["Demonic Horn", "Infernal Blade", "Eternal Flame"],
+        "loss_message": "You lost 💀. The demons devoured your soul!"
+    }
+]
+
+last_usage_time_hunt = {}
+
+@app.on_message(filters.command(["hunt"]))
+async def hunt_command(client, message):
+    user_id = message.from_user.id
+    if user_id in temp_block and time.time() < temp_block[user_id]:
+        return
+
+    current_time = time.time()
+    if user_id in last_usage_time_hunt and current_time - last_usage_time_hunt[user_id] < cooldown_duration_hunt:
+        remaining_time = int(cooldown_duration_hunt - (current_time - last_usage_time_hunt[user_id]))
+        return await message.reply_text(f"You're on cooldown. Please wait {remaining_time} seconds before hunting again.")
+
+    try:
+        try:
+            await app.get_chat_member(MUST_JOIN, user_id)
+        except UserNotParticipant:
+            link = f"https://t.me/{MUST_JOIN}"
+            return await message.reply_text(
+                f"You must join the support group to use this command. Please join [here]({link}).",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Join", url=link)]]),
+                disable_web_page_preview=True
+            )
+
+        dungeon = random.choice(dungeons)
+        image_url = dungeon["image_url"]
+        win_chance = dungeon["win_chance"]
+        gold_range = dungeon["gold_reward"]
+        xp_range = dungeon["xp_reward"]
+        special_drops = dungeon["special_drop"]
+        loss_message = dungeon["loss_message"]
+
+        await message.reply_photo(photo=image_url, caption=f"🗡 You have entered the **{dungeon['name']}** (Rank {dungeon['rank']})")
+
+        await asyncio.sleep(2)
+
+        if random.randint(1, 100) <= win_chance:
+            gold_won = random.randint(*gold_range)
+            xp_won = random.randint(*xp_range)
+            special_item = random.choice(special_drops)
+
+            await user_collection.update_one({'id': user_id}, {'$inc': {'gold': gold_won, 'xp': xp_won}})
+            await message.reply_text(f"🎉 You **won** the battle!\n🏆 **Gold:** {gold_won}\n🔹 **XP:** {xp_won}\n🎁 **Special Drop:** {special_item}")
+
+        else:
+            await message.reply_text(loss_message)
+
+        last_usage_time_hunt[user_id] = current_time
+
+    except Exception as e:
+        await message.reply_text("An error occurred while processing your request. Please try again later.")
+
+@app.on_message(filters.command(["leaderboard"]))
+async def leaderboard_command(client, message):
+    top_users = user_collection.find().sort("gold", -1).limit(5)
+    leaderboard_text = "🏆 **Hunting Leaderboard** 🏆\n\n"
+
+    async for user in top_users:
+        username = user.get("username", "Unknown")
+        gold = user.get("gold", 0)
+        leaderboard_text += f"👑 {username} - 💰 {gold} Gold\n"
+
+    await message.reply_text(leaderboard_text)
+
+@app.on_message(filters.command(["clanhunt"]) & dev_filter)
+async def clanhunt_command(client, message):
+    await message.reply_text("⚔ **Clan Hunt Mode is under development! Stay tuned for updates.**")

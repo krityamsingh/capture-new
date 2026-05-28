@@ -1,0 +1,546 @@
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from . import Grabberu as app
+import textwrap
+
+# =============================================
+# CONFIGURATION
+# =============================================
+HELP_VIDEO_URL = "https://files.catbox.moe/rucpa0.mp4"
+MAX_BUTTONS_PER_ROW = 3
+COMMANDS_PER_PAGE = 10
+
+# Text styling
+class Format:
+    HEADER = "✨"
+    SECTION = "▫️"
+    COMMAND = "▪️"
+    NOTE = "📝 Note:"
+    TIP = "💡 Tip:"
+    WARNING = "⚠️ Warning:"
+
+# =============================================
+# COMMAND DATABASE
+# =============================================
+NORMAL_COMMANDS = {
+    "animelist": {
+        "description": "View anime character collections",
+        "usage": "/animelist [@username]",
+        "notes": "Shows all characters collected by a user"
+    },
+    "auction": {
+        "description": "Sell items in auction house",
+        "usage": "/auction [item] [price]",
+        "notes": "Auction lasts 24 hours"
+    },
+    "bonus": {
+        "description": "Claim daily bonus rewards",
+        "usage": "/bonus",
+        "notes": "Resets every 24 hours"
+    },
+    "check": {
+        "description": "Check user profile information",
+        "usage": "/check @username",
+        "notes": "Shows collection stats and profile"
+    },
+    "cmode": {
+        "description": "Change collection view mode",
+        "usage": "/cmode grid/list",
+        "notes": "Toggle between grid and list view"
+    },
+    "changetime": {
+        "description": "Change time format",
+        "usage": "/changetime 12/24",
+        "notes": "Switch between 12-hour and 24-hour format"
+    },
+    "fav": {
+        "description": "Mark character as favorite",
+        "usage": "/fav [char_id]",
+        "notes": "Add to your favorites list"
+    },
+    "gtop": {
+        "description": "Global top collectors",
+        "usage": "/gtop",
+        "notes": "Shows top 10 collectors"
+    },
+    "harem": {
+        "description": "View your collection",
+        "usage": "/harem",
+        "notes": "Displays all collected characters"
+    },
+    "hstyle": {
+        "description": "Change harem style",
+        "usage": "/hstyle [style]",
+        "notes": "Change collection display theme"
+    },
+    "post": {
+        "description": "Post character showcase",
+        "usage": "/post [char_id]",
+        "notes": "Share your character with others"
+    },
+    "sell": {
+        "description": "Sell characters",
+        "usage": "/sell [char_id] [price]",
+        "notes": "List in marketplace for others to buy"
+    },
+    "store": {
+        "description": "View character store",
+        "usage": "/store",
+        "notes": "Browse available characters"
+    },
+    "claim": {
+        "description": "Claim free rewards",
+        "usage": "/claim",
+        "notes": "Daily free rewards"
+    },
+    "wclaim": {
+        "description": "Weekly claim rewards",
+        "usage": "/wclaim",
+        "notes": "Available once per week"
+    },
+    "mclaim": {
+        "description": "Monthly claim rewards",
+        "usage": "/mclaim",
+        "notes": "Available once per month"
+    },
+    "rarity": {
+        "description": "View rarity info",
+        "usage": "/rarity",
+        "notes": "Shows rarity percentages"
+    },
+    "uncollected": {
+        "description": "View missing chars",
+        "usage": "/uncollected",
+        "notes": "Shows characters you don't have"
+    },
+    "gift": {
+        "description": "Gift characters",
+        "usage": "/gift @user [char_id]",
+        "notes": "Send characters to friends"
+    },
+    "start": {
+        "description": "Bot introduction",
+        "usage": "/start",
+        "notes": "Initial bot setup"
+    },
+    "suggest": {
+        "description": "Suggest features",
+        "usage": "/suggest [text]",
+        "notes": "Send your suggestions to developers"
+    },
+    "seize": {
+        "description": "Buy characters",
+        "usage": "/seize [char_id]",
+        "notes": "Purchase from marketplace"
+    }
+}
+
+GAMING_COMMANDS = {
+    "bal": {
+        "description": "Check your wallet balance",
+        "usage": "/bal",
+        "notes": "Shows cash and bank balance"
+    },
+    "pay": {
+        "description": "Send money to other players",
+        "usage": "/pay @user [amount]",
+        "notes": "2% transaction fee applies"
+    },
+    "loan": {
+        "description": "Take loan from bank",
+        "usage": "/loan [amount]",
+        "notes": "10% interest rate"
+    },
+    "repay": {
+        "description": "Repay your loan",
+        "usage": "/repay [amount]",
+        "notes": "Reduces your debt"
+    },
+    "save": {
+        "description": "Bank deposit",
+        "usage": "/save [amount]",
+        "notes": "Earn 0.1% daily interest"
+    },
+    "withdrawal": {
+        "description": "Bank withdraw",
+        "usage": "/withdrawal [amount]",
+        "notes": "Move money from bank to wallet"
+    },
+    "withdraw": {
+        "description": "Withdraw money",
+        "usage": "/withdraw [amount]",
+        "notes": "Alternative withdrawal command"
+    },
+    "animearc": {
+        "description": "Anime arcade games",
+        "usage": "/animearc",
+        "notes": "Collection of mini-games"
+    },
+    "bankthief": {
+        "description": "Bank robbery game",
+        "usage": "/bankthief",
+        "notes": "High risk, high reward"
+    },
+    "basket": {
+        "description": "Basket shooting game",
+        "usage": "/basket",
+        "notes": "Score points to win"
+    },
+    "battle": {
+        "description": "Battle other players",
+        "usage": "/battle @user",
+        "notes": "PvP combat system"
+    },
+    "clan": {
+        "description": "Clan system",
+        "usage": "/clan create/join",
+        "notes": "Join or create a clan"
+    },
+    "craft": {
+        "description": "Craft items",
+        "usage": "/craft [item]",
+        "notes": "Create powerful items"
+    },
+    "crime": {
+        "description": "Commit crime",
+        "usage": "/crime",
+        "notes": "Risk vs reward activity"
+    },
+    "dart": {
+        "description": "Dart throwing game",
+        "usage": "/dart",
+        "notes": "Test your accuracy"
+    },
+    "dice": {
+        "description": "Dice rolling game",
+        "usage": "/dice",
+        "notes": "Simple betting game"
+    },
+    "slot": {
+        "description": "Slot machine",
+        "usage": "/slot",
+        "notes": "Classic casino game"
+    },
+    "soccer": {
+        "description": "Soccer betting",
+        "usage": "/soccer [amount]",
+        "notes": "Bet on match outcomes"
+    },
+    "toss": {
+        "description": "Coin toss game",
+        "usage": "/toss",
+        "notes": "50/50 chance game"
+    },
+    "bowling": {
+        "description": "Bowling game",
+        "usage": "/bowling",
+        "notes": "Knock down pins to win"
+    },
+    "fight": {
+        "description": "Fight players",
+        "usage": "/fight @user",
+        "notes": "Alternative battle command"
+    },
+    "guess": {
+        "description": "Guessing game",
+        "usage": "/guess",
+        "notes": "Guess the number"
+    },
+    "highrisk": {
+        "description": "High risk betting",
+        "usage": "/highrisk [amount]",
+        "notes": "High stakes gambling"
+    },
+    "invest": {
+        "description": "Invest money",
+        "usage": "/invest [amount]",
+        "notes": "Stock market simulation"
+    },
+    "lever": {
+        "description": "Lever pulling game",
+        "usage": "/lever",
+        "notes": "Luck-based game"
+    },
+    "lootbox": {
+        "description": "Open lootbox",
+        "usage": "/lootbox",
+        "notes": "Get random rewards"
+    },
+    "luckyspin": {
+        "description": "Lucky spin wheel",
+        "usage": "/luckyspin",
+        "notes": "Spin for prizes"
+    },
+    "marry": {
+        "description": "Marry players",
+        "usage": "/marry @user",
+        "notes": "Form in-game relationships"
+    },
+    "mine": {
+        "description": "Mining game",
+        "usage": "/mine",
+        "notes": "Collect resources"
+    },
+    "mysteryshop": {
+        "description": "Mystery shop",
+        "usage": "/mysteryshop",
+        "notes": "Random items for sale"
+    },
+    "prestige": {
+        "description": "Prestige reset",
+        "usage": "/prestige",
+        "notes": "Reset progress for bonuses"
+    },
+    "propose": {
+        "description": "Propose marriage",
+        "usage": "/propose @user",
+        "notes": "Send marriage request"
+    },
+    "quiz": {
+        "description": "Trivia quiz",
+        "usage": "/quiz",
+        "notes": "Test your knowledge"
+    },
+    "rob": {
+        "description": "Rob players",
+        "usage": "/rob @user",
+        "notes": "Steal from others"
+    },
+    "rpay": {
+        "description": "Repay robbery debt",
+        "usage": "/rpay @user [amount]",
+        "notes": "Return stolen money"
+    },
+    "hunt": {
+        "description": "Hunting game",
+        "usage": "/hunt",
+        "notes": "Hunt for animals"
+    },
+    "smash": {
+        "description": "Smash game",
+        "usage": "/smash",
+        "notes": "Destruction game"
+    },
+    "spin": {
+        "description": "Spinner game",
+        "usage": "/spin",
+        "notes": "Wheel of fortune"
+    },
+    "stock": {
+        "description": "Stock market",
+        "usage": "/stock",
+        "notes": "Buy and sell stocks"
+    },
+    "streak": {
+        "description": "View streaks",
+        "usage": "/streak",
+        "notes": "Check your activity streaks"
+    },
+    "task": {
+        "description": "Daily tasks",
+        "usage": "/task",
+        "notes": "Complete for rewards"
+    },
+    "upgrade": {
+        "description": "Upgrade items",
+        "usage": "/upgrade [item]",
+        "notes": "Improve your equipment"
+    },
+    "vip": {
+        "description": "VIP system",
+        "usage": "/vip",
+        "notes": "Premium features"
+    },
+    "work": {
+        "description": "Work jobs",
+        "usage": "/work",
+        "notes": "Earn money through jobs"
+    },
+    "xp": {
+        "description": "Check XP",
+        "usage": "/xp",
+        "notes": "View your experience points"
+    },
+    "tic": {
+        "description": "Tic-tac-toe game",
+        "usage": "/tic @user",
+        "notes": "Play with friends"
+    },
+    "weapons": {
+        "description": "Weapons shop",
+        "usage": "/weapons",
+        "notes": "Buy combat equipment"
+    }
+}
+
+# =============================================
+# UTILITY FUNCTIONS
+# =============================================
+def create_command_buttons(commands: dict, page: int = 0, prefix: str = "cmdhelp"):
+    """Create buttons for commands with pagination"""
+    commands_list = list(commands.items())
+    total_pages = (len(commands_list) + COMMANDS_PER_PAGE - 1) // COMMANDS_PER_PAGE
+    start_idx = page * COMMANDS_PER_PAGE
+    end_idx = start_idx + COMMANDS_PER_PAGE
+    
+    buttons = []
+    for cmd, details in commands_list[start_idx:end_idx]:
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"/{cmd} - {details['description'][:20]}...",
+                callback_data=f"{prefix}_{cmd}"
+            )
+        ])
+    
+    # Add navigation buttons
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"cmdpage_{prefix.split('_')[0]}_{page-1}"))
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"cmdpage_{prefix.split('_')[0]}_{page+1}"))
+    
+    if nav_buttons:
+        buttons.append(nav_buttons)
+    
+    # Add back button
+    buttons.append([
+        InlineKeyboardButton("🔙 Back", callback_data=f"help_{prefix.split('_')[0]}")
+    ])
+    
+    return buttons
+
+def format_command_help(cmd: str, details: dict):
+    """Format detailed command help with rich formatting"""
+    return textwrap.dedent(f"""
+    {Format.HEADER} **{cmd.upper()} COMMAND** {Format.HEADER}
+    
+    {Format.SECTION} **Description:**  
+    {details['description']}
+    
+    {Format.COMMAND} **Usage:**  
+    `{details['usage']}`
+    
+    {Format.NOTE} {details.get('notes', 'No additional notes')}
+    """).strip()
+
+# =============================================
+# MAIN HELP COMMAND
+# =============================================
+@app.on_message(filters.command("help"))
+async def help_command(client: Client, message: Message):
+    """Main help command with video and menu"""
+    help_text = textwrap.dedent(f"""
+    {Format.HEADER} **BOT HELP CENTER** {Format.HEADER}
+    
+    Welcome to the bot help center! Here you can find all the commands and features available.
+    
+    Use the buttons below to navigate through different command categories.
+    """)
+    
+    buttons = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Normal Commands", callback_data="help_normal"),
+         InlineKeyboardButton("🎮 Gaming Commands", callback_data="help_gaming")],
+        [InlineKeyboardButton("❌ Close", callback_data="help_close")]
+    ])
+    
+    await message.reply_video(
+        HELP_VIDEO_URL,
+        caption=help_text,
+        reply_markup=buttons
+    )
+
+# =============================================
+# HELP SECTIONS
+# =============================================
+@app.on_callback_query(filters.regex("^help_(normal|gaming)$"))
+async def show_command_category(client: Client, query: CallbackQuery):
+    """Show either normal or gaming commands"""
+    category = query.matches[0].group(1)
+    
+    if category == "normal":
+        title = "📋 NORMAL COMMANDS"
+        commands = NORMAL_COMMANDS
+        prefix = "cmdhelp_normal"
+    else:
+        title = "🎮 GAMING COMMANDS"
+        commands = GAMING_COMMANDS
+        prefix = "cmdhelp_gaming"
+    
+    buttons = create_command_buttons(commands, 0, prefix)
+    
+    await query.edit_message_text(
+        f"{title}\nSelect a command for details:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+    await query.answer()
+
+# =============================================
+# COMMAND PAGINATION
+# =============================================
+@app.on_callback_query(filters.regex("^cmdpage_(normal|gaming)_(\d+)$"))
+async def handle_command_pagination(client: Client, query: CallbackQuery):
+    """Handle pagination for command lists"""
+    category = query.matches[0].group(1)
+    page = int(query.matches[0].group(2))
+    
+    if category == "normal":
+        title = "📋 NORMAL COMMANDS"
+        commands = NORMAL_COMMANDS
+        prefix = "cmdhelp_normal"
+    else:
+        title = "🎮 GAMING COMMANDS"
+        commands = GAMING_COMMANDS
+        prefix = "cmdhelp_gaming"
+    
+    buttons = create_command_buttons(commands, page, prefix)
+    
+    await query.edit_message_text(
+        f"{title}\nSelect a command for details:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+    await query.answer()
+
+# =============================================
+# COMMAND DETAILS
+# =============================================
+@app.on_callback_query(filters.regex("^cmdhelp_(normal|gaming)_(.+)$"))
+async def show_command_details(client: Client, query: CallbackQuery):
+    """Show detailed help for a specific command"""
+    category = query.matches[0].group(1)
+    cmd = query.matches[0].group(2)
+    
+    if category == "normal" and cmd in NORMAL_COMMANDS:
+        details = NORMAL_COMMANDS[cmd]
+        back_data = "help_normal"
+    elif category == "gaming" and cmd in GAMING_COMMANDS:
+        details = GAMING_COMMANDS[cmd]
+        back_data = "help_gaming"
+    else:
+        await query.answer("Command not found!", show_alert=True)
+        return
+    
+    text = format_command_help(cmd, details)
+    
+    buttons = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 Back", callback_data=back_data)]
+    ])
+    
+    await query.edit_message_text(text, reply_markup=buttons)
+    await query.answer()
+
+# =============================================
+# CLOSE HELP
+# =============================================
+@app.on_callback_query(filters.regex("^help_close$"))
+async def close_help(client: Client, query: CallbackQuery):
+    """Close the help menu"""
+    await query.message.delete()
+    await query.answer()
+
+# =============================================
+# ERROR HANDLING
+# =============================================
+@app.on_callback_query()
+async def handle_unknown_callback(client: Client, query: CallbackQuery):
+    """Handle unknown callback queries"""
+    await query.answer("This button doesn't work anymore. Please try again!", show_alert=True)

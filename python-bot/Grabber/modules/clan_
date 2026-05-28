@@ -1,0 +1,524 @@
+from pyrogram import Client, filters
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+import random
+
+from . import user_collection, clan_collection, join_requests_collection, app, db as database
+from .block import block_dec, block_cbq
+
+def temp_block(user_id):
+    return False  # Agar blocking ka feature nahi chahiye toh False return karein
+    
+def generate_unique_numeric_code():
+    return str(random.randint(1000000000, 9999999999))
+
+def calculate_clan_level(clan_data):
+    cxp = clan_data.get('cxp', 0)
+    return cxp // 30 + 1
+
+@app.on_message(filters.command("myclan"))
+@block_dec
+async def my_clan(client, message):
+    user_id = message.from_user.id
+    if temp_block(user_id):
+        return
+
+    user_data = await user_collection.find_one({'id': user_id})
+    if not user_data or 'clan_id' not in user_data:
+        await message.reply_text(
+            "🚫 **You are not part of any clan!**\n\n"
+            "🔹 To create your own clan, use the `/createclan` command.\n"
+            "🔹 To join an existing clan, use `/joinclan <clan_id>`."
+        )
+        return
+
+    clan_id = user_data['clan_id']
+    clan_data = await clan_collection.find_one({'clan_id': clan_id})
+
+    if not clan_data:
+        await message.reply_text("❌ Clan data not found! Please contact support.")
+        return
+
+    member_count = len(clan_data['members'])
+    clan_level = calculate_clan_level(clan_data)
+    message_text = (
+        f"🏰 **Clan Overview**\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📛 **Name:** {clan_data['name']}\n"
+        f"🆔 **Clan ID:** `{clan_id}`\n"
+        f"⭐ **Level:** {clan_level}\n"
+        f"🎯 **XP:** {clan_data.get('cxp', 0)}\n"
+        f"👑 **Leader:** {clan_data['leader_name']}\n"
+        f"👥 **Members:** {member_count}/20\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"✨ Join the battle and rise to the top! 🔥\n"
+    )
+
+    # Dynamic keyboard
+    if clan_data['leader_id'] != user_id:
+        keyboard = [[InlineKeyboardButton("🚪 Leave Clan", callback_data=f"leave_clan:{clan_id}")]]
+    else:
+        keyboard = [
+            [
+                InlineKeyboardButton("📜 Manage Clan", callback_data=f"manage_clan:{clan_id}"),
+                InlineKeyboardButton("💀 Delete Clan", callback_data=f"delete_clan:{clan_id}")
+            ]
+        ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await message.reply_text(message_text, reply_markup=reply_markup)
+
+@app.on_message(filters.command("createclan"))
+@block_dec
+async def create_clan(client, message):
+    user_id = message.from_user.id
+    clan_name = ' '.join(message.command[1:])
+
+    if not clan_name:
+        await message.reply_text(
+            "❗ **Invalid Clan Name!**\n\n"
+            "🔹 Please provide a name for your clan using the command:\n"
+            "`/createclan <clan_name>`"
+        )
+        return
+
+    try:
+        user_data = await user_collection.find_one({'id': user_id})
+        if not user_data:
+            await message.reply_text(
+                "⚠️ **User not found!**\n\n"
+                "Please start the bot and try again."
+            )
+            return
+
+        current_gold = user_data.get('gold', 0)
+        if current_gold < 0:
+            await message.reply_text(
+                "💰 **Insufficient Gold!**\n\n"
+                f"🔸 You need **10,000 gold** to create a clan.\n"
+                f"🔸 Your current balance: **{current_gold} gold**.\n\n"
+                "📈 Earn more gold and try again!"
+            )
+            return
+
+        # Deduct gold and generate unique clan ID
+        new_gold_balance = current_gold - 0
+        await user_collection.update_one({'id': user_id}, {'$set': {'gold': new_gold_balance}})
+
+        while True:
+            clan_id = generate_unique_numeric_code()
+            if await clan_collection.count_documents({'clan_id': clan_id}) == 0:
+                break
+
+        clan_data = {
+            'clan_id': clan_id,
+            'name': clan_name,
+            'leader_id': user_id,
+            'leader_name': message.from_user.first_name,
+            'members': [user_id],
+            'level': 1,
+            'cxp': 0
+        }
+
+        await clan_collection.insert_one(clan_data)
+        await user_collection.update_one({'id': user_id}, {'$set': {'clan_id': clan_id}})
+
+        await message.reply_text(
+            f"🎉 **Clan Created Successfully!**\n\n"
+            f"🔹 **Clan Name:** {clan_name}\n"
+            f"🔹 **Clan ID:** `{clan_id}`\n\n"
+            "👑 You are now the leader of this clan. Gather members and dominate the leaderboard!\n\n"
+            "ℹ️ Share your Clan ID with others so they can join using `/joinclan <clan_id>`."
+        )
+
+    except Exception as e:
+        await message.reply_text(
+            f"❌ **Error Creating Clan!**\n\n"
+            f"Details: `{str(e)}`\n\n"
+            "Please contact support if this issue persists."
+        )
+
+@app.on_message(filters.command("joinclan"))
+@block_dec
+async def join_clan(client, message):
+    user_id = message.from_user.id
+    clan_id = ' '.join(message.command[1:]).strip()
+
+    if not clan_id:
+        await message.reply_text(
+            "❗ **Invalid Clan ID!**\n\n"
+            "🔹 Please provide a valid Clan ID using:\n"
+            "`/joinclan <clan_id>`"
+        )
+        return
+
+    user_data = await user_collection.find_one({'id': user_id})
+    if user_data and 'clan_id' in user_data:
+        await message.reply_text(
+            "🚫 **You are already in a clan!**\n\n"
+            "🔹 Leave your current clan using `/leaveclan` and then try again."
+        )
+        return
+
+    clan_data = await clan_collection.find_one({'clan_id': clan_id})
+    if not clan_data:
+        await message.reply_text(
+            "❌ **Clan Not Found!**\n\n"
+            "🔹 Please double-check the Clan ID and try again."
+        )
+        return
+
+    if len(clan_data['members']) >= 20:
+        await message.reply_text(
+            "⚠️ **Clan Full!**\n\n"
+            "🔹 This clan already has the maximum number of members (20).\n"
+            "🔹 Try joining another clan or wait for space to open."
+        )
+        return
+
+    # Add join request to the database
+    join_request = {
+        'user_id': user_id,
+        'clan_id': clan_id,
+        'user_name': message.from_user.first_name
+    }
+    await join_requests_collection.insert_one(join_request)
+
+    # Notify the clan leader
+    leader_id = clan_data['leader_id']
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Accept", callback_data=f"aj:{user_id}:{clan_id}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"rj:{user_id}:{clan_id}")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await client.send_message(
+        chat_id=leader_id,
+        text=(
+            f"📨 **Join Request Received!**\n\n"
+            f"🔹 **User:** {message.from_user.first_name}\n"
+            f"🔹 **User ID:** `{user_id}`\n\n"
+            "Do you want to accept this request?"
+        ),
+        reply_markup=reply_markup
+    )
+
+    await message.reply_text(
+        "✅ **Request Sent!**\n\n"
+        "🔹 Your request to join the clan has been sent to the leader.\n"
+        "🔹 Please wait for their response."
+    )
+
+@app.on_message(filters.command("dclan"))
+@block_dec
+async def delete_clan(client, message):
+    user_id = message.from_user.id
+
+    user_data = await user_collection.find_one({'id': user_id})
+    if not user_data or 'clan_id' not in user_data:
+        await message.reply_text(
+            "🚫 **No Clan Found!**\n\n"
+            "🔹 You are not part of any clan.\n"
+            "🔹 Use `/createclan <clan_name>` to start your own clan!"
+        )
+        return
+
+    clan_id = user_data['clan_id']
+    clan_data = await clan_collection.find_one({'clan_id': clan_id})
+
+    if not clan_data:
+        await message.reply_text(
+            "❌ **Clan Not Found!**\n\n"
+            "🔹 The clan data couldn't be retrieved. Please try again."
+        )
+        return
+
+    if clan_data['leader_id'] != user_id:
+        await message.reply_text(
+            "⚠️ **Permission Denied!**\n\n"
+            "🔹 Only the clan leader can delete the clan."
+        )
+        return
+
+    # Confirm deletion with an inline keyboard
+    keyboard = [
+        [
+            InlineKeyboardButton("🗑️ Confirm Deletion", callback_data=f"confirm_delete:{clan_id}"),
+            InlineKeyboardButton("❌ Cancel", callback_data="cancel_delete")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await message.reply_text(
+        f"⚠️ **Clan Deletion Warning!**\n\n"
+        f"🔹 Are you sure you want to delete your clan **{clan_data['name']}**?\n"
+        f"🔹 This action is irreversible, and all members will be removed.\n\n"
+        "🔸 Press **Confirm Deletion** to proceed.",
+        reply_markup=reply_markup
+    )
+
+@app.on_callback_query(filters.regex(r'^confirm_delete:'))
+async def confirm_delete_clan(client, callback_query):
+    try:
+        clan_id = callback_query.data.split(':')[1]
+        user_id = callback_query.from_user.id
+
+        clan_data = await clan_collection.find_one({'clan_id': clan_id})
+        if not clan_data:
+            await callback_query.answer(
+                "❌ **Clan not found or already deleted!**", show_alert=True
+            )
+            return
+
+        if clan_data['leader_id'] != user_id:
+            await callback_query.answer(
+                "🚫 **You are not authorized to delete this clan!**", show_alert=True
+            )
+            return
+
+        # Delete the clan and update all members
+        await clan_collection.delete_one({'clan_id': clan_id})
+        await user_collection.update_many({'clan_id': clan_id}, {'$unset': {'clan_id': ""}})
+
+        await callback_query.answer(
+            "✅ **Clan deleted successfully!**", show_alert=True
+        )
+        await callback_query.edit_message_text(
+            f"🗑️ **Clan '{clan_data['name']}' has been successfully deleted!**\n\n"
+            "🔸 All members have been removed from the clan."
+        )
+    except Exception as e:
+        await callback_query.answer(
+            f"❌ **Error occurred:** {str(e)}", show_alert=True
+        )
+
+@app.on_callback_query(filters.regex(r'^cancel_delete'))
+async def cancel_delete_clan(client, callback_query):
+    await callback_query.answer("❌ Clan deletion canceled.", show_alert=True)
+    await callback_query.edit_message_text(
+        "✅ **Clan deletion process has been canceled.**"
+    )
+
+
+@app.on_callback_query(filters.regex(r'^leave_clan:'))
+@block_cbq
+async def leave_clan_callback(client, callback_query):
+    try:
+        user_id = callback_query.from_user.id
+        clan_id = callback_query.data.split(':')[1]  # Clan ID from callback data
+
+        user_data = await user_collection.find_one({'id': user_id})
+        if not user_data or user_data.get('clan_id') != clan_id:
+            await callback_query.answer(
+                "🚫 **You are not a member of this clan!**", show_alert=True
+            )
+            return
+
+        clan_data = await clan_collection.find_one({'clan_id': clan_id})
+        if not clan_data:
+            await callback_query.answer(
+                "❌ **Clan not found!**", show_alert=True
+            )
+            return
+
+        if clan_data['leader_id'] == user_id:
+            await callback_query.answer(
+                "⚠️ **You are the clan leader! Use `/dclan` to delete the clan.**",
+                show_alert=True
+            )
+            return
+
+        # Remove the user from the clan
+        await clan_collection.update_one({'clan_id': clan_id}, {'$pull': {'members': user_id}})
+        await user_collection.update_one({'id': user_id}, {'$unset': {'clan_id': ""}})
+
+        await callback_query.answer(
+            "✅ **You have successfully left the clan.**", show_alert=True
+        )
+        await callback_query.edit_message_text(
+            "❌ **You have left the clan.**\n\n"
+            "🔹 If you wish to join another clan, use `/joinclan <clan_id>`."
+        )
+    except Exception as e:
+        await callback_query.answer(
+            f"❌ **An error occurred:** {str(e)}", show_alert=True
+        )
+        
+@app.on_callback_query(filters.regex(r'^aj:'))
+async def accept_join_request(client, callback_query):
+    try:
+        _, user_id, clan_id = callback_query.data.split(':')
+
+        clan_data = await clan_collection.find_one({'clan_id': clan_id})
+        if not clan_data:
+            await callback_query.answer(
+                "❌ **Clan not found!**", show_alert=True
+            )
+            return
+
+        if len(clan_data['members']) >= 20:
+            await callback_query.answer(
+                "⚠️ **Clan is full! Cannot add more members.**", show_alert=True
+            )
+            return
+
+        # Add the user to the clan
+        await join_requests_collection.delete_one({'user_id': int(user_id), 'clan_id': clan_id})
+        await clan_collection.update_one({'clan_id': clan_id}, {'$push': {'members': int(user_id)}})
+        await user_collection.update_one({'id': int(user_id)}, {'$set': {'clan_id': clan_id}})
+
+        await callback_query.answer(
+            "✅ **Join request accepted!**", show_alert=True
+        )
+        await callback_query.edit_message_text(
+            f"✅ **User successfully added to the clan!**\n\n"
+            f"🔹 **User ID:** {user_id}"
+        )
+
+        # Notify the user who sent the request
+        await client.send_message(
+            chat_id=int(user_id),
+            text=(
+                f"🎉 **Congratulations!**\n\n"
+                f"🔹 You have been accepted into the clan **{clan_data['name']}**!\n"
+                f"🔹 Work together to make your clan stronger! 💪"
+            )
+        )
+    except Exception as e:
+        await callback_query.answer(
+            f"❌ **An error occurred:** {str(e)}", show_alert=True
+        )
+        
+@app.on_callback_query(filters.regex(r'^rj:'))
+async def reject_join_request(client, callback_query):
+    try:
+        _, user_id, clan_id = callback_query.data.split(':')
+
+        # Remove the join request from the database
+        await join_requests_collection.delete_one({'user_id': int(user_id), 'clan_id': clan_id})
+
+        await callback_query.answer(
+            "❌ **Join request rejected.**", show_alert=True
+        )
+        await callback_query.edit_message_text(
+            f"❌ **Join request rejected for User ID:** {user_id}."
+        )
+
+        # Notify the user who sent the request
+        await client.send_message(
+            chat_id=int(user_id),
+            text=(
+                "❌ **Join Request Rejected**\n\n"
+                "🔹 Unfortunately, your request to join the clan has been rejected.\n"
+                "🔹 You can try joining another clan using `/joinclan <clan_id>`."
+            )
+        )
+    except Exception as e:
+        await callback_query.answer(
+            f"❌ **An error occurred:** {str(e)}", show_alert=True
+        )
+
+@app.on_callback_query(filters.regex(r'^manage_clan:'))
+async def manage_clan_callback(client, callback_query):
+    try:
+        user_id = callback_query.from_user.id
+        clan_id = callback_query.data.split(':')[1]  # Extract clan ID from callback data
+
+        # Fetch clan data
+        clan_data = await clan_collection.find_one({'clan_id': clan_id})
+        if not clan_data:
+            await callback_query.answer("❌ Clan not found.", show_alert=True)
+            return
+
+        # Ensure the user is the leader of the clan
+        if clan_data['leader_id'] != user_id:
+            await callback_query.answer(
+                "🚫 You do not have permission to manage this clan.", show_alert=True
+            )
+            return
+
+        # Generate a list of members
+        member_list = "\n".join(
+            [f"🔹 {idx+1}. {await get_username(member_id)}" for idx, member_id in enumerate(clan_data['members'])]
+        )
+
+        # Build the management panel
+        keyboard = [
+            [InlineKeyboardButton("📋 View Members", callback_data=f"view_members:{clan_id}")],
+            [InlineKeyboardButton("⬆️ Promote Member", callback_data=f"promote_member:{clan_id}")],
+            [InlineKeyboardButton("⬇️ Demote Member", callback_data=f"demote_member:{clan_id}")],
+            [InlineKeyboardButton("❌ Remove Member", callback_data=f"remove_member:{clan_id}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await callback_query.answer()
+        await callback_query.edit_message_text(
+            f"⚙️ **Manage Clan: {clan_data['name']}**\n\n"
+            f"🏅 **Leader:** {await get_username(clan_data['leader_id'])}\n"
+            f"📜 **Members:**\n{member_list}\n\n"
+            f"🔹 Use the buttons below to manage your clan.",
+            reply_markup=reply_markup
+        )
+    except Exception as e:
+        await callback_query.answer(f"❌ Error: {str(e)}", show_alert=True)
+
+@app.on_callback_query(filters.regex(r'^view_members:'))
+async def view_members_callback(client, callback_query):
+    try:
+        clan_id = callback_query.data.split(':')[1]  # Extract clan ID
+        clan_data = await clan_collection.find_one({'clan_id': clan_id})
+
+        if not clan_data:
+            await callback_query.answer("❌ Clan not found.", show_alert=True)
+            return
+
+        # Display list of members with their IDs
+        member_list = "\n".join(
+            [f"🔹 {idx+1}. {await get_username(member_id)} (ID: {member_id})"
+             for idx, member_id in enumerate(clan_data['members'])]
+        )
+
+        await callback_query.answer()
+        await callback_query.edit_message_text(
+            f"📋 **Members of Clan: {clan_data['name']}**\n\n{member_list}"
+        )
+    except Exception as e:
+        await callback_query.answer(f"❌ Error: {str(e)}", show_alert=True)
+
+@app.on_callback_query(filters.regex(r'^promote_member:'))
+async def promote_member_callback(client, callback_query):
+    await callback_query.answer("🚧 Promotion feature is under development.", show_alert=True)
+
+@app.on_callback_query(filters.regex(r'^demote_member:'))
+async def demote_member_callback(client, callback_query):
+    await callback_query.answer("🚧 Demotion feature is under development.", show_alert=True)
+
+@app.on_callback_query(filters.regex(r'^remove_member:'))
+async def remove_member_callback(client, callback_query):
+    try:
+        clan_id = callback_query.data.split(':')[1]
+        user_id = callback_query.from_user.id
+
+        clan_data = await clan_collection.find_one({'clan_id': clan_id})
+        if not clan_data:
+            await callback_query.answer("❌ Clan not found.", show_alert=True)
+            return
+
+        # Ensure the user is the clan leader
+        if clan_data['leader_id'] != user_id:
+            await callback_query.answer("🚫 Only the clan leader can remove members.", show_alert=True)
+            return
+
+        # Prompt for member ID to remove
+        await callback_query.answer()
+        await callback_query.edit_message_text(
+            "📝 **Enter the User ID of the member to remove from the clan.**\n"
+            "Example: `/remove_user <user_id>`"
+        )
+    except Exception as e:
+        await callback_query.answer(f"❌ Error: {str(e)}", show_alert=True)
+
+async def get_username(user_id):
+    user_data = await user_collection.find_one({'id': user_id})
+    return user_data.get('name', f"User {user_id}") if user_data else f"User {user_id}"

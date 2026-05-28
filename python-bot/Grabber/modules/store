@@ -1,0 +1,149 @@
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from bson import ObjectId, errors
+from . import app, user_collection, collection
+
+# Define rarity prices
+RARITY_PRICES = {
+    "⚫ Common": 5000,
+    "🟤 Uncommon": 15000,
+    "🟠 Rare": 50000,
+    "🟣 Epic": 100000,
+    "🟡 Legendary": 250000,
+    "💮 Mythic": 500000,
+    "🔱 Godly": 1000000,
+    "🔮 Limited Edition": 2000000,
+    "🫧 Premium": 3500000,
+    "🏵️ Exotic": 5000000,
+    "⚜️ Unique": 7500000,
+    "⚡ Eternal": 10000000
+}
+
+def format_number(value):
+    """Format numbers with commas."""
+    try:
+        return f"{int(value):,}"
+    except (ValueError, TypeError):
+        return "0"
+
+async def get_user_balance(user_id):
+    """Fetch user balance from database."""
+    user_data = await user_collection.find_one({'id': user_id}, {'balance': 1})
+    return int(user_data.get('balance', 0)) if user_data else 0
+
+@app.on_message(filters.command(["store", "shop", "market"]))
+async def store_menu(client: Client, message: Message):
+    """Main store entry point."""
+    user_id = message.from_user.id
+    user_name = message.from_user.first_name
+
+    balance = await get_user_balance(user_id)
+
+    welcome_text = (
+        f"🛒 **Welcome to the Store, {user_name}!**\n\n"
+        f"💰 **Your Balance:** `{format_number(balance)}` Coins\n\n"
+        "🔹 Choose an option below:"
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🛍️ Buy Characters", callback_data=f"store_buy_{user_id}")],
+        [InlineKeyboardButton("❌ Close", callback_data="store_close")]
+    ])
+
+    bot_image_url = "https://files.catbox.moe/748cwa.jpg"
+    await message.reply_photo(photo=bot_image_url, caption=welcome_text, reply_markup=keyboard)
+
+@app.on_callback_query(filters.regex("^store_(buy|close)"))
+async def store_callback(client, callback_query):
+    """Handles buy and close actions."""
+    action, user_id = callback_query.data.split("_")[1], int(callback_query.data.split("_")[2])
+
+    if callback_query.from_user.id != user_id:
+        return await callback_query.answer("❌ This is not for you!", show_alert=True)
+
+    if action == "close":
+        await callback_query.message.delete()
+        return
+
+    if action == "buy":
+        items = await collection.find({'rarity_emoji': {'$exists': True}}).to_list(length=10)
+        if not items:
+            return await callback_query.answer("⚠️ No characters available in the store!", show_alert=True)
+
+        buttons = [
+            [InlineKeyboardButton(
+                f"{item['name']} {item['rarity_emoji']} - {format_number(RARITY_PRICES.get(item['rarity_emoji'], 10000))} 💰",
+                callback_data=f"buy_{item['_id']}_{user_id}"
+            )] for item in items
+        ]
+        buttons.append([InlineKeyboardButton("🔙 Back", callback_data=f"store_back_{user_id}")])
+
+        await callback_query.message.edit_text(
+            "🛒 **Available Characters:**\n\nChoose a character to buy:",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+
+@app.on_message(filters.command("sell"))
+async def sell_character(client: Client, message: Message):
+    """Handles selling a character via command."""
+    user_id = message.from_user.id
+    args = message.text.split()
+
+    if len(args) < 2:
+        return await message.reply("⚠️ Usage: `/sell <character_id>`")
+
+    character_id = args[1]
+
+    # Validate if character_id is a valid ObjectId
+    try:
+        object_id = ObjectId(character_id)
+    except errors.InvalidId:
+        return await message.reply("❌ Invalid character ID!")
+
+    item = await collection.find_one({'_id': object_id, 'owner_id': user_id})
+    if not item:
+        return await message.reply("❌ You don't own this character or it doesn't exist!")
+
+    sell_price = RARITY_PRICES.get(item['rarity_emoji'], 10000) // 2
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Confirm", callback_data=f"confirm_sell_{character_id}_{user_id}")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_sell")]
+    ])
+
+    await message.reply_photo(
+        photo=item.get('img_url', "https://via.placeholder.com/300"),
+        caption=f"💸 **Are you sure you want to sell {item['name']} {item['rarity_emoji']} for {format_number(sell_price)} Coins?**",
+        reply_markup=keyboard
+    )
+
+@app.on_callback_query(filters.regex("^confirm_sell_"))
+async def confirm_sell(client, callback_query):
+    """Confirms character selling."""
+    _, character_id, user_id = callback_query.data.split("_")
+    user_id = int(user_id)
+
+    if callback_query.from_user.id != user_id:
+        return await callback_query.answer("❌ This is not for you!", show_alert=True)
+
+    try:
+        object_id = ObjectId(character_id)
+    except errors.InvalidId:
+        return await callback_query.answer("❌ Invalid character ID!", show_alert=True)
+
+    item = await collection.find_one({'_id': object_id, 'owner_id': user_id})
+    if not item:
+        return await callback_query.answer("⚠️ Character not found or already sold!", show_alert=True)
+
+    sell_price = RARITY_PRICES.get(item['rarity_emoji'], 10000) // 2
+
+    await collection.delete_one({'_id': object_id})
+    await user_collection.update_one({'id': user_id}, {'$inc': {'balance': sell_price}})
+
+    await callback_query.answer("✅ Character sold!")
+    await callback_query.message.edit_text(f"💸 **You sold {item['name']} {item['rarity_emoji']} for {format_number(sell_price)} Coins!**")
+
+@app.on_callback_query(filters.regex("^cancel_sell"))
+async def cancel_sell(client, callback_query):
+    """Cancels character selling."""
+    await callback_query.message.delete()

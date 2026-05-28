@@ -1,0 +1,150 @@
+import random
+import io
+from PIL import Image, ImageDraw, ImageFont
+from pyrogram import Client, filters
+from pyrogram.types import InlineKeyboardButton as IKB, InlineKeyboardMarkup as IKM
+from .block import block_cbq
+
+from Grabber import user_collection, collection
+from . import add, deduct, show, abank, dbank, sbank, sudb, capsify, app, sudo_filter, group_user_totals_collection
+from .watchers import delta_watcher
+
+BG_IMAGE_PATH = "Images/blues.jpg"
+FONT_PATH = "Fonts/font.ttf"
+DEFAULT_MESSAGE_LIMIT = 45
+DEFAULT_MODE_SETTINGS = {
+    "character": True,
+    "words": True,
+    "maths": True
+}
+group_message_counts = {}
+math_questions = {}
+
+def generate_random_math_equation_image() -> tuple[bytes, int]:
+    num1 = random.randint(100, 999)
+    num2 = random.randint(100, 999)
+    operation = random.choice(['+', '-', '*'])
+
+    equation = f"{num1} {operation} {num2} = ?"
+    answer = eval(f"{num1}{operation}{num2}")
+
+    img = Image.open("Images/blues.jpg")  # Rename your file to pink_theme.jpg or change path
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.truetype(FONT_PATH, 50)  # Adjusted font size for this background
+
+    # Center the text exactly
+    bbox = draw.textbbox((0, 0), equation, font=font)
+    text_width = bbox[2] - bbox[0]
+    text_height = bbox[3] - bbox[1]
+
+    x = (img.width - text_width) / 2
+    y = (img.height - text_height) / 2
+
+    draw.text((x, y), equation, font=font, fill="black")
+
+    byte_arr = io.BytesIO()
+    img.save(byte_arr, format='PNG')
+    byte_arr.seek(0)
+    return byte_arr.getvalue(), answer
+
+async def get_sudo_user_ids():
+    sudo_users = await sudb.find({}, {'user_id': 1}).to_list(length=None)
+    return [user['user_id'] for user in sudo_users]
+
+@app.on_message(filters.command("stime") & sudo_filter)
+async def set_message_limit(client, message):
+    user_id = message.from_user.id
+    sudo_user_ids = await get_sudo_user_ids()
+
+    if user_id not in sudo_user_ids:
+        return await message.reply_text("ᴏɴʟʏ ꜱᴜᴅᴏ ᴜꜱᴇʀꜱ ᴄᴀɴ ꜱᴇᴛ ᴛʜᴇ ᴍᴇꜱꜱᴀɢᴇ ʟɪᴍɪᴛ!")
+    
+    try:
+        limit = int(message.command[1])
+        if limit <= 0:
+            raise ValueError
+        group_message_counts[message.chat.id] = {'count': 0, 'limit': limit}
+        await message.reply_text(f"ᴄʜᴀʟʟᴇɴɢᴇ ᴡɪʟʟ ᴀᴘᴘᴇᴀʀ ᴇᴠᴇʀʏ {limit} ᴍᴇꜱꜱᴀɢᴇꜱ!")
+    except:
+        await message.reply_text("ᴘʟᴇᴀꜱᴇ ᴘʀᴏᴠɪᴅᴇ ᴀ ᴠᴀʟɪᴅ ɴᴜᴍʙᴇʀ!")
+
+@app.on_message(filters.group, group=delta_watcher)
+async def delta(client, message):
+    chat_id = message.chat.id
+    group_message_counts.setdefault(chat_id, {'count': 0, 'limit': DEFAULT_MESSAGE_LIMIT})
+    group_message_counts[chat_id]['count'] += 1
+
+    if group_message_counts[chat_id]['count'] < group_message_counts[chat_id]['limit']:
+        return
+
+    group_message_counts[chat_id]['count'] = 0
+    chat_modes = await group_user_totals_collection.find_one({"chat_id": chat_id}) or DEFAULT_MODE_SETTINGS
+    if not chat_modes.get("maths", True): return
+
+    image_bytes, correct = generate_random_math_equation_image()
+    math_questions[chat_id] = correct
+
+    wrong_choices = list(set([
+        correct + random.randint(1, 9),
+        correct - random.randint(1, 9),
+        correct + random.choice([10, -10, 5])
+    ]))
+    options = [correct] + wrong_choices
+    random.shuffle(options)
+
+    keyboard = IKM([
+        [IKB(f"{options[i]}", callback_data="correct" if options[i] == correct else "incorrect"),
+         IKB(f"{options[i + 1]}", callback_data="correct" if options[i + 1] == correct else "incorrect")]
+        for i in range(0, len(options), 2)
+    ])
+
+    await client.send_photo(
+        chat_id=chat_id,
+        photo=io.BytesIO(image_bytes),
+        caption=(
+            "✦ <b><u>ᴍᴀᴛʜ ᴄʜᴀʟʟᴇɴɢᴇ ᴀᴄᴛɪᴠᴀᴛᴇᴅ!</u></b> ✦\n\n"
+            "• ᴄᴀɴ ʏᴏᴜ ꜱᴏʟᴠᴇ ᴛʜɪꜱ ᴇǫᴜᴀᴛɪᴏɴ ɪɴ ᴛɪᴍᴇ?\n"
+            "• ᴄʜᴏᴏꜱᴇ ᴛʜᴇ ᴄᴏʀʀᴇᴄᴛ ᴀɴꜱᴡᴇʀ ʙᴇʟᴏᴡ!\n\n"
+            "ᴛɪᴍᴇ ᴛᴏ ꜱʜᴏᴡ ʏᴏᴜʀ ɢᴇɴɪᴜꜱ... ⏳"
+        ),
+        reply_markup=keyboard
+    )
+
+@app.on_callback_query(filters.regex("correct|incorrect"))
+@block_cbq
+async def answer_handler(client, cbq):
+    user_id = cbq.from_user.id
+    name = cbq.from_user.first_name
+    chat_id = cbq.message.chat.id
+
+    if chat_id not in math_questions:
+        return await cbq.answer("ᴛʜɪꜱ ᴄʜᴀʟʟᴇɴɢᴇ ʜᴀꜱ ᴇxᴘɪʀᴇᴅ!", show_alert=True)
+
+    if cbq.data == "correct":
+        reward = random.randint(25000, 45000)
+        await cbq.answer(
+            f"⚡ ʙʀᴀɪɴɪᴀᴄ ᴀʟᴇʀᴛ! {name} ɢᴏᴛ ɪᴛ ʀɪɢʜᴛ!\n\n✦ ʀᴇᴡᴀʀᴅ: +{reward} 🔖",
+            show_alert=True
+        )
+        await add(user_id, reward)
+        caption = (
+            f"✦ <b>ᴍᴀᴛʜ ᴍᴀꜱᴛᴇʀ ᴅᴇᴛᴇᴄᴛᴇᴅ!</b> ✦\n\n"
+            f"• <i>{name} ꜱᴏʟᴠᴇᴅ ᴛʜᴇ ᴇǫᴜᴀᴛɪᴏɴ ʟɪᴋᴇ ᴀ ʙᴏꜱꜱ!</i>\n"
+            f"• ʀᴇᴡᴀʀᴅ ᴇᴀʀɴᴇᴅ: <code>{reward} 🔖</code>\n\n"
+            f"ᴋᴇᴇᴘ ᴛʜᴀᴛ ʙʀᴀɪɴ ᴡᴏʀᴋɪɴɢ! 🧠"
+        )
+        try:
+            await cbq.message.react("⚡")
+        except:
+            pass
+    else:
+        await cbq.answer("ɴɪᴄᴇ ᴛʀʏ, ʙᴜᴛ ᴛʜᴀᴛ'ꜱ ɴᴏᴛ ɪᴛ! ʙᴇᴛᴛᴇʀ ʟᴜᴄᴋ ɴᴇxᴛ ᴛɪᴍᴇ.", show_alert=True)
+        caption = (
+            f"✦ <b>ᴡʀᴏɴɢ ᴀɴꜱᴡᴇʀ!</b> ✦\n\n"
+            f"• <i>{name} ᴛʀɪᴇᴅ ʙᴜᴛ ᴍɪꜱꜱᴇᴅ ᴛʜᴇ ᴍᴀʀᴋ.</i>\n"
+            f"• ᴛʜᴇ ꜱᴇᴀʀᴄʜ ꜰᴏʀ ᴛʜᴇ ʀɪɢʜᴛ ᴀɴꜱᴡᴇʀ ᴄᴏɴᴛɪɴᴜᴇꜱ...\n\n"
+            f"ᴅᴏɴ'ᴛ ɢɪᴠᴇ ᴜᴘ! ✨"
+        )
+
+    del math_questions[chat_id]
+    await cbq.message.edit_caption(caption=caption, reply_markup=None)

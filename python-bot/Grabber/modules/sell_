@@ -1,0 +1,115 @@
+import asyncio
+from pyrogram import Client, filters
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from Grabber import user_collection, collection, app  
+
+# Rarity price mapping
+rarity_prices = {
+    "⚫ Common": 50,
+    "🟤 Uncommon": 100,
+    "🟠 Rare": 250,
+    "🟣 Epic": 500,
+    "🟡 Legendary": 1000,
+    "💮 Mythic": 2500,
+    "🔱 Godly": 5000,
+    "🔮 Limited Edition": 8000,
+    "🫧 Premium": 12000,
+    "🏵️ Exotic": 18000,
+    "⚜️ Unique": 25000,
+    "⚡ Eternal": 50000,
+    "🧬 Animation": 75000
+}
+
+# Dictionary to store ongoing sell requests
+sell_requests = {}
+
+@app.on_message(filters.command("sell"))
+async def sell_command(client, message):
+    if len(message.command) < 2:
+        return await message.reply_text("❌ **Usage:** /sell [character_id]")
+
+    user_id = message.from_user.id
+    char_id = message.command[1]
+
+    # Check if user owns the character
+    user_data = await user_collection.find_one({"user_id": user_id, "characters.id": char_id})
+    if not user_data:
+        return await message.reply_text("⚠️ **You don't own this character!**")
+
+    # Get character details
+    char_data = await collection.find_one({"id": char_id})
+    if not char_data:
+        return await message.reply_text("❌ **Character not found!**")
+
+    # Check character count (only 1 will be sold)
+    char_count = sum(1 for c in user_data["characters"] if c["id"] == char_id)
+    if char_count < 1:
+        return await message.reply_text("❌ **You don't have this character!**")
+
+    rarity = char_data.get("rarity", "⚫ Common")
+    price = rarity_prices.get(rarity, 100)  # Default price if rarity not found
+
+    # Message format
+    text = (
+        f"✨ **{char_data['name']}**\n"
+        f"📺 **Anime:** {char_data['anime']}\n"
+        f"🎗 **Rarity:** {rarity}\n"
+        f"🆔 **ID:** {char_id}\n"
+        f"💰 **Selling Price:** {price} coins\n\n"
+        f"⚡ **Do you want to sell this character?**"
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Accept", callback_data=f"sell_accept_{char_id}")],
+        [InlineKeyboardButton("❌ Decline", callback_data=f"sell_decline_{char_id}")]
+    ])
+
+    # Store request data
+    sell_requests[user_id] = {"char_id": char_id, "price": price}
+
+    # Send Image/Video with Sell options
+    media_url = char_data.get("video_url") if rarity == "🧬 Animation" else char_data.get("img_url")
+    
+    if rarity == "🧬 Animation":
+        await message.reply_video(video=media_url, caption=text, reply_markup=keyboard)
+    else:
+        await message.reply_photo(photo=media_url, caption=text, reply_markup=keyboard)
+
+
+# Accept Sell Request
+@app.on_callback_query(filters.regex("^sell_accept_"))
+async def accept_sell(client, query: CallbackQuery):
+    user_id = query.from_user.id
+    char_id = query.data.split("_")[2]
+
+    if user_id not in sell_requests or sell_requests[user_id]["char_id"] != char_id:
+        return await query.answer("⚠️ Sell request expired or invalid!", show_alert=True)
+
+    sell_price = sell_requests[user_id]["price"]
+
+    # Remove one instance of the character from user collection
+    await user_collection.update_one(
+        {"user_id": user_id, "characters.id": char_id},
+        {"$pull": {"characters": {"id": char_id}}}
+    )
+
+    # Add coins to user balance
+    await user_collection.update_one(
+        {"user_id": user_id},
+        {"$inc": {"balance": sell_price}}
+    )
+
+    await query.message.edit_caption(f"✅ **Character Sold!**\n💰 **+{sell_price} coins added to your balance.**")
+    del sell_requests[user_id]
+
+
+# Decline Sell Request
+@app.on_callback_query(filters.regex("^sell_decline_"))
+async def decline_sell(client, query: CallbackQuery):
+    user_id = query.from_user.id
+
+    if user_id in sell_requests:
+        del sell_requests[user_id]
+
+    await query.message.delete()
+    await query.answer("❌ Sell canceled.", show_alert=True)

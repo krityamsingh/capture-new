@@ -1,0 +1,516 @@
+"""
+Grabber/modules/info.py
+/check command — look up any character by ID, with inline buttons.
+
+Fixes applied vs old version:
+  • Both animation rarity strings accepted ("⚜️ Animated" AND "🧬 Animation")
+  • video_url always tried first when present, regardless of rarity label
+  • Temp-file helper cleans up even on exceptions (finally block)
+  • callback_data split uses maxsplit=1 so IDs containing "_" never break
+  • how_many callback: counts correctly from nested character list
+  • top10 callback: safe user-fetch with full fallback
+  • back_to_details: robust media-type detection, no rarity mismatch crash
+  • All handlers use unique callback patterns — no clash with spawn.py pyrogram handlers
+  • Owners field shown in caption
+  • Descriptive error messages logged with char_id context
+"""
+
+import aiohttp
+import asyncio
+import tempfile
+import os
+
+from telegram import (
+    Update,
+    InlineKeyboardButton as IKB,
+    InlineKeyboardMarkup as IKM,
+    InputMediaPhoto,
+    InputMediaVideo,
+)
+from telegram.ext import CommandHandler, CallbackContext, CallbackQueryHandler
+from Grabber import user_collection, collection, application
+from . import capsify
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CONSTANTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Both animation rarity strings are treated as video characters.
+# This bridges the mismatch between modules that store "⚜️ Animated"
+# and modules that store "🧬 Animation".
+ANIMATION_RARITIES = {"⚜️ Animated", "🧬 Animation"}
+
+RARITY_EMOJIS = {
+    "🔴 Common":         "🔴",
+    "🔵 Uncommon":       "🔵",
+    "🟠 Rare":           "🟠",
+    "🟡 Legendary":      "🟡",
+    "🫧 Premium":        "🫧",
+    "🔮 Limited Edition":"🔮",
+    "🏵️ Exotic":         "🏵️",
+    "⚜️ Animated":       "⚜️",
+    "🧬 Animation":      "🧬",
+    "🌼 Celebrity":      "🌼",
+    "🎐 Crystal":        "🎐",
+    "🍹 Neon":           "🍹",
+    "🧿 Supreme":        "🧿",
+    "⚡ Thundra":        "⚡",
+    "🛸 Galvoria":       "🛸",
+}
+
+# Download timeout for media (seconds)
+DOWNLOAD_TIMEOUT = 120
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _is_animated(character: dict) -> bool:
+    """Return True if this character should be sent as a video."""
+    rarity = character.get("rarity", "")
+    video_url = character.get("video_url", "")
+    img_url = character.get("img_url", "")
+    img_type = character.get("img_type", "")
+    file_extension = character.get("file_extension", "")
+    
+    # 1. Check if rarity implies animation/video
+    rarity_lower = rarity.lower() if rarity else ""
+    if "animated" in rarity_lower or "animation" in rarity_lower:
+        return True
+        
+    # 2. Check if img_type is video
+    if img_type == "video":
+        return True
+        
+    # 3. Check if video_url is set and not empty
+    if video_url:
+        return True
+        
+    # 4. Check if the URL ends with a video extension
+    for url in (video_url, img_url):
+        if url:
+            url_lower = url.lower()
+            if any(url_lower.endswith(ext) for ext in [".mp4", ".gif", ".gifv", ".webm"]):
+                return True
+                
+    # 5. Check if file_extension is a video extension
+    if file_extension and file_extension.lower() in [".mp4", ".gif", ".gifv", ".webm"]:
+        return True
+        
+    return False
+
+
+def _build_keyboard(char_id: str) -> IKM:
+    return IKM([
+        [
+            IKB("🔍 ʜᴏᴡ ᴍᴀɴʏ ɪ ʜᴀᴠᴇ", callback_data=f"chk_howmany_{char_id}"),
+            IKB("🏆 ᴛᴏᴘ 10 ʜᴏʟᴅᴇʀꜱ",    callback_data=f"chk_top10_{char_id}"),
+        ]
+    ])
+
+
+def _build_back_keyboard(char_id: str) -> IKM:
+    return IKM([
+        [IKB("↩️ ʙᴀᴄᴋ ᴛᴏ ᴅᴇᴛᴀɪʟꜱ",   callback_data=f"chk_details_{char_id}")],
+        [IKB("🔍 ʜᴏᴡ ᴍᴀɴʏ ɪ ʜᴀᴠᴇ", callback_data=f"chk_howmany_{char_id}")],
+    ])
+
+
+def _build_caption(character: dict) -> str:
+    rarity      = character.get("rarity", "Unknown")
+    emoji       = RARITY_EMOJIS.get(rarity, "✨")
+    owners      = character.get("owners", 0)
+    owners_text = str(owners) if owners else "None yet"
+
+    return (
+        f"✨ <b>ʟᴏᴏᴋ ᴀᴛ ᴛʜɪꜱ ᴄʜᴀʀᴀᴄᴛᴇʀ!</b>\n\n"
+        f"🆔 <b>ID:</b> <code>{character['id']}</code>\n"
+        f"👤 <b>ɴᴀᴍᴇ:</b> {character['name']}\n"
+        f"📺 <b>ᴀɴɪᴍᴇ:</b> {character['anime']}\n"
+        f"{emoji} <b>ʀᴀʀɪᴛʏ:</b> {rarity}\n"
+        f"👥 <b>ᴏᴡɴᴇʀs:</b> {owners_text}"
+    )
+
+
+async def _download_to_temp(url: str, suffix: str) -> str:
+    """
+    Download *url* to a temporary file and return its path.
+    The caller MUST delete the file when done (use try/finally).
+
+    We download rather than passing raw URLs because external hosts
+    (Catbox, etc.) return WEBPAGE_MEDIA_EMPTY when Telegram tries
+    to fetch them directly.
+    """
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            url,
+            timeout=aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT),
+            headers={"User-Agent": "Mozilla/5.0"},
+        ) as resp:
+            if resp.status != 200:
+                raise RuntimeError(
+                    f"HTTP {resp.status} downloading media from {url!r}"
+                )
+            data = await resp.read()
+
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    try:
+        tmp.write(data)
+    finally:
+        tmp.close()
+
+    return tmp.name
+
+
+def _safe_delete(path: str | None) -> None:
+    """Delete a temp file, ignoring any errors."""
+    if path:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+async def _send_character_media(
+    character: dict,
+    reply_fn,           # coroutine: reply_video / reply_photo / reply_text
+    keyboard: IKM,
+    caption: str,
+    fallback_reply_fn,  # coroutine for plain-text fallback
+) -> None:
+    """
+    Download and send the right media type for *character*.
+    Falls back to a plain-text reply if everything fails.
+    Automatically cleans up the temp file.
+    """
+    video_url = character.get("video_url", "")
+    img_url   = character.get("img_url", "")
+    animated  = _is_animated(character)
+
+    tmp_path = None
+    try:
+        media_url = (video_url or img_url) if animated else (img_url or video_url)
+        if not media_url:
+            await fallback_reply_fn(
+                capsify("No media found for this character.") + f"\n\n{caption}",
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+            return
+
+        if animated:
+            ext = ".mp4"
+            if ".gif" in media_url.lower():
+                ext = ".gif"
+            tmp_path = await _download_to_temp(media_url, ext)
+            with open(tmp_path, "rb") as fh:
+                await reply_fn(
+                    "video",
+                    media=fh,
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=keyboard,
+                )
+            return
+        else:
+            ext = ".jpg"
+            if ".png" in media_url.lower():
+                ext = ".png"
+            elif ".gif" in media_url.lower():
+                ext = ".gif"
+            tmp_path = await _download_to_temp(media_url, ext)
+            with open(tmp_path, "rb") as fh:
+                await reply_fn(
+                    "photo",
+                    media=fh,
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=keyboard,
+                )
+            return
+
+    finally:
+        _safe_delete(tmp_path)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  /check  — main command
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def details(update: Update, context: CallbackContext) -> None:
+    """
+    /check <id>
+    Look up a character by ID and send its media with action buttons.
+    """
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            capsify("Usage: /check <character_id>\nExample: /check 1234")
+        )
+        return
+
+    char_id   = args[0].strip()
+    character = await collection.find_one({"id": char_id})
+
+    if not character:
+        await update.message.reply_text(
+            capsify(f"No character found with ID: {char_id}")
+        )
+        return
+
+    caption  = _build_caption(character)
+    keyboard = _build_keyboard(char_id)
+
+    # Thin adapter so _send_character_media stays framework-agnostic
+    async def _reply(media_type, media, caption, parse_mode, reply_markup):
+        if media_type == "video":
+            await update.message.reply_video(
+                video=media,
+                caption=caption,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+                write_timeout=120,
+                read_timeout=120,
+            )
+        else:
+            await update.message.reply_photo(
+                photo=media,
+                caption=caption,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+                write_timeout=120,
+                read_timeout=120,
+            )
+
+    async def _fallback(text, parse_mode, reply_markup):
+        await update.message.reply_text(
+            text, parse_mode=parse_mode, reply_markup=reply_markup
+        )
+
+    try:
+        await _send_character_media(character, _reply, keyboard, caption, _fallback)
+    except Exception as exc:
+        print(f"❌ /check error  char_id={char_id!r}: {exc}")
+        try:
+            await update.message.reply_text(
+                f"❌ Failed to load media. Showing details instead:\n\n{caption}",
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+        except Exception as fallback_exc:
+            print(f"❌ /check double fallback error: {fallback_exc}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Callback: 🔍 How many do I have?
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def how_many(update: Update, context: CallbackContext) -> None:
+    """
+    Button: "How many do I have?"
+    Counts how many copies of this character the pressing user owns.
+    """
+    query = update.callback_query
+    await query.answer()   # acknowledge immediately to stop the loading spinner
+
+    # callback_data format: chk_howmany_<char_id>
+    # maxsplit=2 so char IDs that contain "_" are preserved intact
+    parts   = query.data.split("_", 2)
+    char_id = parts[2] if len(parts) == 3 else ""
+
+    if not char_id:
+        await query.answer("⚠️ Invalid callback data.", show_alert=True)
+        return
+
+    user_id   = query.from_user.id
+    # Robust match: check both integer and string formats for user id
+    user_data = await user_collection.find_one({"$or": [{"id": user_id}, {"id": str(user_id)}]})
+
+    count = 0
+    if user_data:
+        characters_list = user_data.get("characters") or user_data.get("waifus") or []
+        count = sum(
+            1 for c in characters_list
+            if str(c.get("id", "")) == str(char_id)
+        )
+
+    await query.answer(
+        f"🌀 You own {count} cop{'y' if count == 1 else 'ies'} of this character.",
+        show_alert=True,
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Callback: 🏆 Top 10 holders
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def top_grabbers(update: Update, context: CallbackContext) -> None:
+    """
+    Button: "Top 10 holders"
+    Shows a leaderboard of the 10 users who own the most copies.
+    """
+    query   = update.callback_query
+    await query.answer("⚡ Fetching top holders...", cache_time=5)
+
+    # callback_data format: chk_top10_<char_id>
+    parts   = query.data.split("_", 2)
+    char_id = parts[2] if len(parts) == 3 else ""
+
+    if not char_id:
+        return
+
+    # Aggregate: count how many times this char_id appears across all users
+    # We group by id and extract first_name/last_name/username from the documents
+    # to avoid slow and rate-limited Telegram API get_chat calls.
+    pipeline = [
+        {"$match":  {"characters.id": char_id}},
+        {"$unwind": "$characters"},
+        {"$match":  {"characters.id": char_id}},
+        {"$group":  {
+            "_id": "$id",
+            "count": {"$sum": 1},
+            "first_name": {"$first": "$first_name"},
+            "last_name": {"$first": "$last_name"},
+            "username": {"$first": "$username"}
+        }},
+        {"$sort":   {"count": -1}},
+        {"$limit":  10},
+    ]
+    top_users = await user_collection.aggregate(pipeline).to_list(length=10)
+
+    if not top_users:
+        leaderboard = "❌ No one owns this character yet."
+    else:
+        lines = []
+        for idx, row in enumerate(top_users, start=1):
+            uid = row["_id"]
+            cnt = row["count"]
+            first_name = row.get("first_name") or "User"
+            last_name = row.get("last_name") or ""
+            full_name = f"{first_name} {last_name}".strip()
+            if not full_name:
+                full_name = f"User {uid}"
+            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(idx, "🏅")
+            lines.append(
+                f"{medal} <b><a href='tg://user?id={uid}'>{full_name}</a></b> ×{cnt}"
+            )
+        leaderboard = "\n".join(lines)
+
+    character = await collection.find_one({"id": char_id})
+    if not character:
+        await query.answer("Character no longer exists.", show_alert=True)
+        return
+
+    caption = (
+        f"✨ <b>ʟᴏᴏᴋ ᴀᴛ ᴛʜɪꜱ ᴄʜᴀʀᴀᴄᴛᴇʀ!</b>\n\n"
+        f"🆔 <b>ID:</b> <code>{character['id']}</code>\n"
+        f"👤 <b>ɴᴀᴍᴇ:</b> {character['name']}\n"
+        f"📺 <b>ᴀɴɪᴍᴇ:</b> {character['anime']}\n"
+        f"✨ <b>ʀᴀʀɪᴛʏ:</b> {character.get('rarity', 'Unknown')}\n\n"
+        f"🏆 <b>ᴛᴏᴘ 10 ʜᴏʟᴅᴇʀs:</b>\n{leaderboard}"
+    )
+
+    try:
+        await query.edit_message_caption(
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=_build_back_keyboard(char_id),
+        )
+    except Exception as exc:
+        print(f"❌ top_grabbers edit error  char_id={char_id!r}: {exc}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Callback: ↩️ Back to character details
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def back_to_details(update: Update, context: CallbackContext) -> None:
+    """
+    Button: "Back to details"
+    Re-sends the character's media (video or photo) by editing the message.
+    Handles all video character variations correctly.
+    """
+    query   = update.callback_query
+    await query.answer("🌀 Loading...", cache_time=2)
+
+    # callback_data format: chk_details_<char_id>
+    parts   = query.data.split("_", 2)
+    char_id = parts[2] if len(parts) == 3 else ""
+
+    if not char_id:
+        return
+
+    character = await collection.find_one({"id": char_id})
+    if not character:
+        await query.answer("Character no longer exists.", show_alert=True)
+        return
+
+    caption   = _build_caption(character)
+    keyboard  = _build_keyboard(char_id)
+    video_url = character.get("video_url", "")
+    img_url   = character.get("img_url", "")
+    animated  = _is_animated(character)
+
+    tmp_path = None
+    try:
+        media_url = (video_url or img_url) if animated else (img_url or video_url)
+        if not media_url:
+            await query.answer("⚠️ No media available for this character.", show_alert=True)
+            return
+
+        if animated:
+            ext = ".mp4"
+            if ".gif" in media_url.lower():
+                ext = ".gif"
+            tmp_path = await _download_to_temp(media_url, ext)
+            with open(tmp_path, "rb") as fh:
+                await query.edit_message_media(
+                    media=InputMediaVideo(
+                        media=fh,
+                        caption=caption,
+                        parse_mode="HTML",
+                    ),
+                    reply_markup=keyboard,
+                    write_timeout=120,
+                    read_timeout=120,
+                )
+        else:
+            ext = ".jpg"
+            if ".png" in media_url.lower():
+                ext = ".png"
+            elif ".gif" in media_url.lower():
+                ext = ".gif"
+            tmp_path = await _download_to_temp(media_url, ext)
+            with open(tmp_path, "rb") as fh:
+                await query.edit_message_media(
+                    media=InputMediaPhoto(
+                        media=fh,
+                        caption=caption,
+                        parse_mode="HTML",
+                    ),
+                    reply_markup=keyboard,
+                    write_timeout=120,
+                    read_timeout=120,
+                )
+
+    except Exception as exc:
+        print(f"❌ back_to_details error  char_id={char_id!r}: {exc}")
+        await query.answer("❌ Failed to load media. Try again.", show_alert=True)
+
+    finally:
+        _safe_delete(tmp_path)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Register Handlers
+#
+#  NOTE: Callback patterns use the "chk_" prefix so they NEVER conflict with
+#  the pyrogram handlers in spawn.py which also use "top10_" and similar names.
+# ══════════════════════════════════════════════════════════════════════════════
+
+application.add_handler(CommandHandler("check", details))
+application.add_handler(CallbackQueryHandler(how_many,        pattern=r"^chk_howmany_.+$"))
+application.add_handler(CallbackQueryHandler(top_grabbers,    pattern=r"^chk_top10_.+$"))
+application.add_handler(CallbackQueryHandler(back_to_details, pattern=r"^chk_details_.+$"))

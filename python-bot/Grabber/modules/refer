@@ -1,0 +1,54 @@
+import datetime
+from pyrogram import Client, filters
+from pyrogram.types import Message
+from . import Grabberu as app, user_collection
+
+REFERRAL_BONUS = 5000  # Bonus for inviting a new user
+
+@app.on_message(filters.command("refer"))
+async def refer(client: Client, message: Message):
+    user_id = message.from_user.id
+    username = message.from_user.username
+
+    # Generate referral link
+    referral_link = f"https://t.me/{client.me.username}?start=ref_{user_id}"
+
+    # Fetch referral count
+    user_data = await user_collection.find_one({'id': user_id}, projection={'referrals': 1})
+    referral_count = user_data.get("referrals", 0) if user_data else 0
+
+    # Send referral message
+    await message.reply_text(
+        f"🔗 **Your Referral Link:**\n"
+        f"`{referral_link}`\n\n"
+        f"🎉 Invite friends and earn `{REFERRAL_BONUS}` coins when they join!\n"
+        f"📊 **Total Referrals:** {referral_count}"
+    )
+
+@app.on_message(filters.command("tart"))
+async def start_command(client: Client, message: Message):
+    user_id = message.from_user.id
+    user_data = await user_collection.find_one({'id': user_id})
+
+    # Check if user is new
+    if not user_data:
+        args = message.text.split()
+        if len(args) > 1 and args[1].startswith("ref_"):
+            referrer_id = int(args[1].split("_")[1])
+
+            # Prevent self-referrals
+            if referrer_id == user_id:
+                return await message.reply_text("⚠️ You can't refer yourself!")
+
+            # Add referral bonus
+            await user_collection.update_one(
+                {'id': referrer_id}, {"$inc": {"balance": REFERRAL_BONUS, "referrals": 1}}, upsert=True
+            )
+
+            await message.reply_text(
+                f"🎉 Welcome to the bot! You've been referred by someone and they received `{REFERRAL_BONUS}` coins."
+            )
+
+    # Register new user
+    await user_collection.update_one({'id': user_id}, {"$setOnInsert": {"balance": 0, "referrals": 0}}, upsert=True)
+    await message.reply_text("👋 Welcome to the bot! Use `/help` to see all commands.")

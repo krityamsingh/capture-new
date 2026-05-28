@@ -1,0 +1,759 @@
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from datetime import datetime, timedelta
+from bson.objectid import ObjectId
+import asyncio
+import random
+import time
+from typing import Dict, List, Set
+from . import app, user_collection, collection, giveaway_collection
+
+OWNER_ID = 7861332030
+SUPPORT_GROUP = -1002319525523
+SUPPORT_CHANNEL = -1002681814995
+
+# Active giveaways storage
+active_giveaways: Dict[str, Dict] = {}
+elimination_tasks: Dict[str, asyncio.Task] = {}
+
+# Elimination messages with funny twist
+ELIMINATION_MESSAGES = [
+    "**Fast Elimination!** ⚡\n\n{user} got eliminated at lightning speed! ⚡",
+    "**Quick Round!** 🎯\n\n{user} couldn't keep up with the speed!",
+    "**Speed Elimination!** 💨\n\n{user} got blown away in fast round!",
+    "**Rapid Fire!** 🔥\n\n{user} got eliminated in rapid round!",
+    "**Quick Remove!** 🚀\n\n{user} got removed in super fast round!",
+    "**Speed Round!** ⏩\n\n{user} got eliminated in speed round!",
+    "**Fast Clear!** 🧹\n\n{user} got swept away quickly!",
+    "**Quick Elimination!** 🎮\n\n{user} game over in fast round!",
+    "**Speed Strike!** ⚡\n\n{user} got hit by speed elimination!",
+    "**Fast Cut!** ✂️\n\n{user} got cut in quick round!",
+    "**Rapid Elimination!** 🌪️\n\n{user} got eliminated in tornado round!",
+    "**Quick Exit!** 🚪\n\n{user} made a quick exit!"
+]
+
+ELIMINATION_GIFS = [
+    "https://files.catbox.moe/9ozz4p.mp4",
+    "https://files.catbox.moe/c94aqd.mp4",
+    "https://files.catbox.moe/nlu8rf.mp4",
+    "https://files.catbox.moe/svp4ye.mp4"
+]
+
+# Check if group and channel are linked
+async def are_group_channel_linked():
+    try:
+        group_chat = await app.get_chat(SUPPORT_GROUP)
+        channel_chat = await app.get_chat(SUPPORT_CHANNEL)
+        
+        if hasattr(group_chat, 'linked_chat') and group_chat.linked_chat:
+            return group_chat.linked_chat.id == SUPPORT_CHANNEL
+        return False
+    except:
+        return False
+
+# /startgive command (Owner only)
+@app.on_message(filters.command("startgive") & filters.user(OWNER_ID))
+async def start_giveaway(client: Client, message: Message):
+    try:
+        char_id = message.text.split()[1].strip()
+    except IndexError:
+        return await message.reply("**Usage:** `/startgive [character_id]`")
+
+    # Find character
+    char = None
+    try:
+        char = await collection.find_one({"_id": ObjectId(char_id)})
+    except:
+        char = await collection.find_one({"id": char_id})
+    
+    if not char:
+        char = await collection.find_one({"name": char_id})
+        if not char:
+            return await message.reply("❌ Character not found in database.")
+
+    # Standardize character data
+    char["_id"] = str(char.get("_id"))
+    if "id" not in char:
+        char["id"] = str(char["_id"])
+
+    giveaway_id = f"giveaway_{int(time.time())}"
+    
+    # Create giveaway data
+    giveaway_data = {
+        "giveaway_id": giveaway_id,
+        "character": char,
+        "participants": [],
+        "eliminated": [],
+        "start_time": datetime.utcnow(),
+        "status": "active",
+        "group_message_id": None,
+        "channel_message_id": None,
+        "pinned_message_id": None,
+        "last_elimination": datetime.utcnow(),
+        "total_participants": 0,
+        "join_count": 0,
+        "join_phase": True
+    }
+
+    # Save to database
+    await giveaway_collection.delete_many({"status": "active"})
+    await giveaway_collection.insert_one(giveaway_data)
+    
+    # Store in memory
+    active_giveaways[giveaway_id] = giveaway_data
+
+    # Send to SUPPORT_CHANNEL with character info
+    channel_caption = (
+        f"**🎮 Character Giveaway Started!**\n\n"
+        f"**{char['name']}** - {char['rarity']}\n"
+        f"From: {char['anime']}\n"
+        f"Use /joingive in group to participate!"
+    )
+
+    if char.get("video_url"):
+        channel_msg = await client.send_video(SUPPORT_CHANNEL, char["video_url"], caption=channel_caption)
+    else:
+        channel_msg = await client.send_photo(SUPPORT_CHANNEL, char["img_url"], caption=channel_caption)
+
+    # Send to SUPPORT_GROUP with giveaway info
+    group_caption = (
+        f"**🎮 Character Giveaway Started!**\n\n"
+        f"**{char['name']}** - {char['rarity']}\n"
+        f"From: {char['anime']}\n\n"
+        f"**Participants:** 0\n"
+        f"**Status:** Join Phase - Use /joingive\n"
+    )
+
+    # Create inline button with channel message link
+    view_button = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔍 View Character", url=channel_msg.link)
+    ]])
+
+    if char.get("video_url"):
+        group_msg = await client.send_video(SUPPORT_GROUP, char["video_url"], caption=group_caption, reply_markup=view_button)
+    else:
+        group_msg = await client.send_photo(SUPPORT_GROUP, char["img_url"], caption=group_caption, reply_markup=view_button)
+
+    # Check if group and channel are linked
+    are_linked = await are_group_channel_linked()
+    
+    # Only pin message if groups are not linked
+    if not are_linked:
+        # Create and pin instruction message
+        instruction_msg = await client.send_message(
+            SUPPORT_GROUP,
+            f"**🎯 Active Giveaway \n\n"
+            f"**Character:** {char['name']}\n"
+            f"**Rarity:** {char['rarity']}\n\n"
+            f"**Use /joingive to participate!**\n\n"
+            f"Join now before elimination rounds start!"
+        )
+        
+        # Pin the instruction message
+        await client.pin_chat_message(SUPPORT_GROUP, instruction_msg.id)
+
+        # Update database with pinned message ID
+        await giveaway_collection.update_one(
+            {"giveaway_id": giveaway_id},
+            {"$set": {"pinned_message_id": instruction_msg.id}}
+        )
+        active_giveaways[giveaway_id]["pinned_message_id"] = instruction_msg.id
+
+    # Update database with message IDs
+    await giveaway_collection.update_one(
+        {"giveaway_id": giveaway_id},
+        {"$set": {
+            "channel_message_id": channel_msg.id,
+            "group_message_id": group_msg.id
+        }}
+    )
+    active_giveaways[giveaway_id].update({
+        "channel_message_id": channel_msg.id,
+        "group_message_id": group_msg.id
+    })
+
+    # Send DM to owner
+    try:
+        await client.send_message(
+            OWNER_ID,
+            f"**🎮 Giveaway Started Successfully**\n\n"
+            f"**Character:** {char['name']}\n"
+            f"**Rarity:** {char['rarity']}\n"
+            f"**Anime:** {char['anime']}\n"
+            f"**Giveaway ID:** {giveaway_id}\n\n"
+        )
+    except:
+        pass
+
+    await message.reply(f"✅ Giveaway started!\nCharacter: {char['name']}\nID: {giveaway_id}")
+
+# /forcestart command (Owner only) - Start elimination phase immediately
+@app.on_message(filters.command("forcestart") & filters.user(OWNER_ID))
+async def force_start_giveaway(client: Client, message: Message):
+    active_giveaway = await giveaway_collection.find_one({"status": "active"})
+    if not active_giveaway:
+        return await message.reply("❌ No active giveaway found.")
+
+    giveaway_id = active_giveaway["giveaway_id"]
+    
+    if giveaway_id not in active_giveaways:
+        return await message.reply("❌ Giveaway not active in memory.")
+
+    # Update join phase status
+    await giveaway_collection.update_one(
+        {"giveaway_id": giveaway_id},
+        {"$set": {"join_phase": False}}
+    )
+    active_giveaways[giveaway_id]["join_phase"] = False
+
+    # Start elimination process immediately
+    if giveaway_id not in elimination_tasks:
+        elimination_tasks[giveaway_id] = asyncio.create_task(
+            elimination_process(client, giveaway_id)
+        )
+
+    # Update pinned message if exists
+    if active_giveaway.get("pinned_message_id"):
+        try:
+            await client.edit_message_text(
+                SUPPORT_GROUP,
+                active_giveaway["pinned_message_id"],
+                f"**🎯 Active Giveaway\n\n"
+                f"**Character:** {active_giveaway['character']['name']}\n"
+                f"**Rarity:** {active_giveaway['character']['rarity']}\n\n"
+                f"**Remaining:** {len(active_giveaway['participants'])} participants\n\n"
+            )
+        except:
+            pass
+
+    # Update group message
+    group_caption = (
+        f"**🎮 Character Giveaway - ELIMINATION PHASE**\n\n"
+        f"**{active_giveaway['character']['name']}** - {active_giveaway['character']['rarity']}\n"
+        f"From: {active_giveaway['character']['anime']}\n\n"
+        f"**Participants:** {len(active_giveaway['participants'])}\n"
+        f"**Status:** Elimination Phase Active\n"
+    )
+
+    view_button = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔍 View Character", 
+                           url=f"https://t.me/c/{str(SUPPORT_CHANNEL)[4:]}/{active_giveaway.get('channel_message_id', '')}")
+    ]])
+
+    try:
+        await client.edit_message_caption(
+            SUPPORT_GROUP,
+            active_giveaway["group_message_id"],
+            caption=group_caption,
+            reply_markup=view_button
+        )
+    except:
+        pass
+
+    # Send DM to owner
+    try:
+        await client.send_message(
+            OWNER_ID,
+            f"**⚡ Giveaway Force Started**\n\n"
+            f"**Character:** {active_giveaway['character']['name']}\n"
+            f"**Remaining Participants:** {len(active_giveaway['participants'])}\n"
+            f"**Giveaway ID:** {giveaway_id}\n\n"
+            f"⚡ **Super Fast Mode Activated**\n"
+            f"Eliminations every 10 seconds!"
+        )
+    except:
+        pass
+
+    await message.reply(f"✅ Elimination phase activated!\nRemaining: {len(active_giveaway['participants'])} participants")
+
+# /joingive command
+@app.on_message(filters.command("joingive"))
+async def join_giveaway(client: Client, message: Message):
+    user = message.from_user
+    
+    # Check if any active giveaway exists
+    active_giveaway = await giveaway_collection.find_one({"status": "active"})
+    if not active_giveaway:
+        return await message.reply("❌ No active giveaway currently running.")
+
+    giveaway_id = active_giveaway["giveaway_id"]
+    
+    # Check if join phase is still active
+    if not active_giveaway.get("join_phase", True):
+        return await message.reply("❌ Join phase ended. Cannot join now.")
+    
+    # Check if user already joined
+    if any(p["user_id"] == user.id for p in active_giveaway["participants"]):
+        return await message.reply("⚠️ You already joined this giveaway.")
+
+    # Add user to participants
+    user_data = {
+        "user_id": user.id,
+        "username": user.username,
+        "first_name": user.first_name,
+        "join_time": datetime.utcnow(),
+        "join_number": active_giveaway["join_count"] + 1
+    }
+
+    await giveaway_collection.update_one(
+        {"giveaway_id": giveaway_id},
+        {
+            "$push": {"participants": user_data},
+            "$inc": {"join_count": 1, "total_participants": 1}
+        }
+    )
+
+    # Update memory
+    if giveaway_id in active_giveaways:
+        active_giveaways[giveaway_id]["participants"].append(user_data)
+        active_giveaways[giveaway_id]["join_count"] += 1
+        active_giveaways[giveaway_id]["total_participants"] += 1
+
+    # Get current participant count
+    new_count = active_giveaway["total_participants"] + 1
+
+    # Update group message with new count
+    group_caption = (
+        f"**🎮 Character Giveaway Started!**\n\n"
+        f"**{active_giveaway['character']['name']}** - {active_giveaway['character']['rarity']}\n"
+        f"From: {active_giveaway['character']['anime']}\n\n"
+        f"**Participants:** {new_count}\n"
+        f"**Status:** Join Phase - Use /joingive\n"
+    )
+
+    view_button = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔍 View Character", 
+                           url=f"https://t.me/c/{str(SUPPORT_CHANNEL)[4:]}/{active_giveaway.get('channel_message_id', '')}")
+    ]])
+
+    try:
+        await client.edit_message_caption(
+            SUPPORT_GROUP,
+            active_giveaway["group_message_id"],
+            caption=group_caption,
+            reply_markup=view_button
+        )
+    except:
+        pass
+
+    # Update pinned message if exists
+    if active_giveaway.get("pinned_message_id"):
+        try:
+            await client.edit_message_text(
+                SUPPORT_GROUP,
+                active_giveaway["pinned_message_id"],
+                f"**🎯 Active Giveaway\n\n"
+                f"**Character:** {active_giveaway['character']['name']}\n"
+                f"**Rarity:** {active_giveaway['character']['rarity']}\n\n"
+                f"**Participants:** {new_count} joined\n\n"
+                f"**Use /joingive to participate!**"
+            )
+        except:
+            pass
+
+    # Send notifications
+    join_message = (
+        f"**🎊 New Participant Joined!**\n\n"
+        f"**User:** {user.mention if user.username else user.first_name}\n"
+        f"**Total Participants:** {new_count}\n"
+        f"**Join Number:** #{user_data['join_number']}"
+    )
+
+    # Send to support group
+    await client.send_message(SUPPORT_GROUP, join_message)
+
+    # Send DM to owner
+    try:
+        await client.send_message(
+            OWNER_ID,
+            f"**📥 New Giveaway Join**\n\n"
+            f"**User:** {user.first_name} (@{user.username})\n"
+            f"**User ID:** {user.id}\n"
+            f"**Join Number:** #{user_data['join_number']}\n"
+            f"**Total Participants:** {new_count}\n"
+            f"**Character:** {active_giveaway['character']['name']}"
+        )
+    except:
+        pass
+
+    # Send DM to user
+    try:
+        await client.send_message(
+            user.id,
+            f"**✅ Joined Giveaway Successfully!**\n\n"
+            f"**Character:** {active_giveaway['character']['name']}\n"
+            f"**Rarity:** {active_giveaway['character']['rarity']}\n"
+            f"**Your Join Number:** #{user_data['join_number']}\n\n"
+            f"Good luck! 🍀"
+        )
+    except:
+        pass
+
+    await message.reply("✅ Successfully joined the giveaway! Check your DM for details.")
+
+# Elimination process - SUPER FAST MODE (10 seconds)
+async def elimination_process(client: Client, giveaway_id: str):
+    round_count = 0
+    
+    while giveaway_id in active_giveaways:
+        giveaway = active_giveaways[giveaway_id]
+        
+        if len(giveaway["participants"]) <= 1:
+            break
+
+        # Wait only 10 seconds for super fast mode
+        await asyncio.sleep(10)
+
+        if giveaway_id not in active_giveaways:
+            break
+
+        participants = giveaway["participants"]
+        if len(participants) <= 1:
+            break
+
+        round_count += 1
+        
+        # Calculate elimination percentage (more aggressive for fast mode)
+        remaining = len(participants)
+        
+        # More aggressive elimination percentages for super fast mode
+        if remaining > 1000:
+            eliminate_percent = 0.6  # 60% for large groups
+        elif remaining > 500:
+            eliminate_percent = 0.5  # 50%
+        elif remaining > 200:
+            eliminate_percent = 0.4  # 40%
+        elif remaining > 100:
+            eliminate_percent = 0.35 # 35%
+        elif remaining > 50:
+            eliminate_percent = 0.3  # 30%
+        elif remaining > 20:
+            eliminate_percent = 0.25 # 25%
+        elif remaining > 10:
+            eliminate_percent = 0.2  # 20%
+        else:
+            eliminate_percent = 0.15 # 15%
+
+        eliminate_count = max(1, int(remaining * eliminate_percent))
+        
+        # For final rounds, eliminate more aggressively
+        if remaining <= 10:
+            eliminate_count = max(1, remaining - 1)  # Leave only 1 if possible
+        
+        # For very large groups, cap elimination count but keep it high
+        if eliminate_count > 300:
+            eliminate_count = 300
+        
+        # Randomly select participants to eliminate
+        eliminated_users = random.sample(participants, eliminate_count)
+        eliminated_ids = [user["user_id"] for user in eliminated_users]
+
+        # Update database
+        await giveaway_collection.update_one(
+            {"giveaway_id": giveaway_id},
+            {
+                "$pull": {"participants": {"user_id": {"$in": eliminated_ids}}},
+                "$push": {"eliminated": {"$each": eliminated_users}},
+                "$set": {"last_elimination": datetime.utcnow(), "join_phase": False}
+            }
+        )
+
+        # Update memory
+        giveaway["participants"] = [p for p in participants if p["user_id"] not in eliminated_ids]
+        giveaway["eliminated"].extend(eliminated_users)
+        giveaway["join_phase"] = False
+
+        # Send elimination notifications (only for significant rounds to avoid spam)
+        if eliminate_count >= 5 or remaining <= 20:
+            elimination_text = random.choice(ELIMINATION_MESSAGES)
+            
+            # Create mentions for eliminated users (limit to first 5 to avoid message too long)
+            eliminated_mentions = []
+            for user_data in eliminated_users[:5]:  # Show first 5 only
+                try:
+                    user_obj = await client.get_users(user_data["user_id"])
+                    mention = user_obj.mention
+                    eliminated_mentions.append(mention)
+                except:
+                    eliminated_mentions.append(f"User#{user_data['user_id']}")
+
+            # Add count for remaining eliminated users
+            if len(eliminated_users) > 5:
+                eliminated_mentions.append(f"...and {len(eliminated_users) - 5} more")
+
+            # Create elimination message
+            elimination_message = (
+                f"{elimination_text.format(user=', '.join(eliminated_mentions))}\n\n"
+                f"**Remaining:** {len(giveaway['participants'])}\n"
+                f"**Eliminated:** {eliminate_count}\n"
+                f"**Next round:** 10 seconds ⚡"
+            )
+
+            # Send elimination GIF with message to group
+            try:
+                elimination_gif = random.choice(ELIMINATION_GIFS)
+                await client.send_animation(SUPPORT_GROUP, elimination_gif, caption=elimination_message)
+            except:
+                await client.send_message(SUPPORT_GROUP, elimination_message)
+
+        # Send DM to owner about elimination round (only for significant rounds)
+        if eliminate_count >= 10 or remaining <= 50:
+            try:
+                await client.send_message(
+                    OWNER_ID,
+                    f"**⚡ Elimination Round {round_count}**\n\n"
+                    f"**Character:** {giveaway['character']['name']}\n"
+                    f"**Eliminated:** {eliminate_count} participants\n"
+                    f"**Remaining:** {len(giveaway['participants'])}\n"
+                    f"**Giveaway ID:** {giveaway_id}\n\n"
+                    f"Next round in 10 seconds! ⚡"
+                )
+            except:
+                pass
+
+        # Update group message every round
+        status_msg = "Final Round! ⚡" if len(giveaway["participants"]) <= 5 else f"Round {round_count} 🔥"
+        
+        group_caption = (
+            f"**🎮 Character Giveaway - ELIMINATION PHASE**\n\n"
+            f"**{giveaway['character']['name']}** - {giveaway['character']['rarity']}\n"
+            f"From: {giveaway['character']['anime']}\n\n"
+            f"**Remaining:** {len(giveaway['participants'])}\n"
+            f"**Status:** {status_msg}\n"
+        )
+
+        view_button = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔍 View Character", 
+                               url=f"https://t.me/c/{str(SUPPORT_CHANNEL)[4:]}/{giveaway.get('channel_message_id', '')}")
+        ]])
+
+        try:
+            await client.edit_message_caption(
+                SUPPORT_GROUP,
+                giveaway["group_message_id"],
+                caption=group_caption,
+                reply_markup=view_button
+            )
+        except:
+            pass
+
+        # Update pinned message for final rounds
+        if len(giveaway["participants"]) <= 10 and giveaway.get("pinned_message_id"):
+            try:
+                await client.edit_message_text(
+                    SUPPORT_GROUP,
+                    giveaway["pinned_message_id"],
+                    f"**🎯 Active Giveaway - FINAL ROUND**\n\n"
+                    f"**Character:** {giveaway['character']['name']}\n"
+                    f"**Rarity:** {giveaway['character']['rarity']}\n\n"
+                    f"**Final {len(giveaway['participants'])} participants!**\n\n"
+                    f"⚡ **Winner announcement in seconds!** ⚡"
+                )
+            except:
+                pass
+
+    # Giveaway ended - declare winner
+    if giveaway_id in active_giveaways and len(giveaway["participants"]) == 1:
+        await declare_winner(client, giveaway_id)
+
+# Declare winner
+async def declare_winner(client: Client, giveaway_id: str):
+    if giveaway_id not in active_giveaways:
+        return
+
+    giveaway = active_giveaways[giveaway_id]
+    winner_data = giveaway["participants"][0]
+    character = giveaway["character"]
+
+    try:
+        winner_user = await client.get_users(winner_data["user_id"])
+        
+        # Add character to winner's collection
+        await user_collection.update_one(
+            {"id": winner_data["user_id"]},
+            {"$push": {"characters": character}},
+            upsert=True
+        )
+
+        # Update database
+        await giveaway_collection.update_one(
+            {"giveaway_id": giveaway_id},
+            {"$set": {
+                "status": "completed",
+                "winner_id": winner_data["user_id"],
+                "end_time": datetime.utcnow(),
+                "join_phase": False
+            }}
+        )
+
+        # Winner announcement message
+        winner_message = (
+            f"**🏆 Giveaway Winner!**\n\n"
+            f"**Congratulations!** {winner_user.mention}\n\n"
+            f"**Won:** {character['name']} - {character['rarity']}\n"
+            f"**From:** {character['anime']}\n\n"
+            f"⚡ **Super Fast Giveaway Completed!** ⚡\n"
+            f"Character added to collection! 🎉"
+        )
+
+        # Send to both channels
+        await client.send_message(SUPPORT_GROUP, winner_message)
+        await client.send_message(SUPPORT_CHANNEL, winner_message)
+
+        # Unpin the giveaway message if exists
+        if giveaway.get("pinned_message_id"):
+            try:
+                await client.unpin_chat_message(SUPPORT_GROUP, giveaway["pinned_message_id"])
+            except:
+                pass
+
+        # Send DM to owner
+        try:
+            await client.send_message(
+                OWNER_ID,
+                f"**🏆 Giveaway Completed**\n\n"
+                f"**Winner:** {winner_user.first_name} (@{winner_user.username})\n"
+                f"**Winner ID:** {winner_data['user_id']}\n"
+                f"**Character:** {character['name']}\n"
+                f"**Rarity:** {character['rarity']}\n"
+                f"**Total Participants:** {giveaway['total_participants']}\n"
+            )
+        except:
+            pass
+
+        # DM winner
+        try:
+            await client.send_message(
+                winner_data["user_id"],
+                f"**🎉 CONGRATULATIONS! YOU WON!**\n\n"
+                f"**Prize:** {character['name']} - {character['rarity']}\n"
+                f"**From:** {character['anime']}\n\n"
+                f"The character has been added to your collection!\n"
+                f"Use /collection to view your characters!"
+            )
+        except:
+            pass
+
+        # Cleanup
+        del active_giveaways[giveaway_id]
+        if giveaway_id in elimination_tasks:
+            del elimination_tasks[giveaway_id]
+
+    except Exception as e:
+        print(f"Error declaring winner: {e}")
+
+# /stoprg command (Owner only)
+@app.on_message(filters.command("stoprg") & filters.user(OWNER_ID))
+async def stop_giveaway(client: Client, message: Message):
+    active_giveaway = await giveaway_collection.find_one({"status": "active"})
+    if not active_giveaway:
+        return await message.reply("❌ No active giveaway found.")
+
+    giveaway_id = active_giveaway["giveaway_id"]
+    
+    # Cancel elimination task
+    if giveaway_id in elimination_tasks:
+        elimination_tasks[giveaway_id].cancel()
+        del elimination_tasks[giveaway_id]
+
+    # Update database
+    await giveaway_collection.update_one(
+        {"giveaway_id": giveaway_id},
+        {"$set": {"status": "cancelled", "end_time": datetime.utcnow(), "join_phase": False}}
+    )
+
+    # Remove from memory
+    if giveaway_id in active_giveaways:
+        del active_giveaways[giveaway_id]
+
+    # Unpin the giveaway message if exists
+    if active_giveaway.get("pinned_message_id"):
+        try:
+            await client.unpin_chat_message(SUPPORT_GROUP, active_giveaway["pinned_message_id"])
+        except:
+            pass
+
+    # Send cancellation message
+    cancellation_msg = (
+        f"**🚫 Giveaway Cancelled**\n\n"
+        f"Giveaway for {active_giveaway['character']['name']} has been cancelled.\n\n"
+        f"**Participants:** {active_giveaway.get('total_participants', 0)} joined\n"
+        f"**Duration:** {(datetime.utcnow() - active_giveaway['start_time']).seconds} seconds"
+    )
+
+    await client.send_message(SUPPORT_GROUP, cancellation_msg)
+    await client.send_message(SUPPORT_CHANNEL, cancellation_msg)
+
+    # Send DM to owner
+    try:
+        await client.send_message(
+            OWNER_ID,
+            f"**🛑 Giveaway Cancelled**\n\n"
+            f"**Character:** {active_giveaway['character']['name']}\n"
+            f"**Participants:** {active_giveaway.get('total_participants', 0)}\n"
+            f"**Duration:** {(datetime.utcnow() - active_giveaway['start_time']).seconds} seconds\n"
+            f"**Giveaway ID:** {giveaway_id}\n\n"
+            f"Giveaway cancelled successfully."
+        )
+    except:
+        pass
+
+    await message.reply("✅ Giveaway cancelled successfully.")
+
+# /giveawayinfo command
+@app.on_message(filters.command("giveawayinfo"))
+async def giveaway_info(client: Client, message: Message):
+    active_giveaway = await giveaway_collection.find_one({"status": "active"})
+    if not active_giveaway:
+        return await message.reply("❌ No active giveaway running.")
+
+    char = active_giveaway["character"]
+    participants = active_giveaway.get("participants", [])
+    eliminated = active_giveaway.get("eliminated", [])
+    
+    status = "Join Phase" if active_giveaway.get("join_phase", True) else "Elimination Phase"
+    
+    info_text = (
+        f"**🎮 Current Giveaway Info**\n\n"
+        f"**Character:** {char['name']}\n"
+        f"**Rarity:** {char['rarity']}\n"
+        f"**Anime:** {char['anime']}\n\n"
+        f"**Status:** {status}\n"
+        f"**Remaining:** {len(participants)}\n"
+        f"**Eliminated:** {len(eliminated)}\n"
+        f"**Total Joined:** {active_giveaway.get('total_participants', 0)}\n\n"
+        f"⚡ **Super Fast Mode** ⚡\n"
+        f"Eliminations every 10 seconds!"
+    )
+
+    await message.reply(info_text)
+
+# Background task to cleanup finished giveaways
+async def giveaway_cleanup():
+    while True:
+        try:
+            # Cleanup old completed giveaways from memory
+            current_time = datetime.utcnow()
+            giveaway_ids_to_remove = []
+            
+            for giveaway_id, giveaway in active_giveaways.items():
+                if (current_time - giveaway["start_time"]).days > 1:  # Remove after 1 day
+                    giveaway_ids_to_remove.append(giveaway_id)
+            
+            for giveaway_id in giveaway_ids_to_remove:
+                del active_giveaways[giveaway_id]
+                if giveaway_id in elimination_tasks:
+                    elimination_tasks[giveaway_id].cancel()
+                    del elimination_tasks[giveaway_id]
+                    
+        except Exception as e:
+            print(f"Giveaway cleanup error: {e}")
+        
+        await asyncio.sleep(3600)  # Run every hour
+
+# Start cleanup task on bot startup
+async def giveaway_startup():
+    await asyncio.sleep(5)
+    asyncio.create_task(giveaway_cleanup())
+
+asyncio.get_event_loop().create_task(giveaway_startup())

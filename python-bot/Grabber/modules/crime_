@@ -1,0 +1,927 @@
+import random
+import time
+from pyrogram import Client, filters
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
+from . import Grabberu as app, user_collection
+from datetime import datetime, timedelta
+
+# Crime cooldown and tracking system
+crime_cooldowns = {}
+crime_in_progress = {}
+crime_leaderboard = {}
+
+# Crime difficulty levels
+CRIME_TYPES = {
+    "petty": {
+        "name": "👜 Petty Theft",
+        "min_reward": 200,
+        "max_reward": 1000,
+        "success_rate": 0.8,
+        "jail_chance": 0.1,
+        "emoji": "👜",
+        "cooldown": 60
+    },
+    "robbery": {
+        "name": "🏦 Bank Robbery",
+        "min_reward": 1500,
+        "max_reward": 5000,
+        "success_rate": 0.5,
+        "jail_chance": 0.4,
+        "emoji": "🏦",
+        "cooldown": 300
+    },
+    "heist": {
+        "name": "💎 Diamond Heist",
+        "min_reward": 5000,
+        "max_reward": 15000,
+        "success_rate": 0.3,
+        "jail_chance": 0.7,
+        "emoji": "💎",
+        "cooldown": 600
+    },
+    "cyber": {
+        "name": "💻 Cyber Crime",
+        "min_reward": 3000,
+        "max_reward": 10000,
+        "success_rate": 0.6,
+        "jail_chance": 0.2,
+        "emoji": "💻",
+        "cooldown": 400
+    }
+}
+
+# Jail system
+jailed_users = {}
+
+# Gang system
+gangs = {}
+
+@app.on_message(filters.command("crime"))
+async def crime_menu(client: Client, message: Message):
+    user_id = message.from_user.id
+    
+    # Check if user is jailed
+    if user_id in jailed_users:
+        release_time = jailed_users[user_id]
+        if datetime.now() < release_time:
+            time_left = release_time - datetime.now()
+            await message.reply_text(f"🚨 You're in jail! Time remaining: {str(time_left).split('.')[0]}")
+            return
+        else:
+            del jailed_users[user_id]
+    
+    # Check if user is already in a crime
+    if user_id in crime_in_progress:
+        crime_data = crime_in_progress[user_id]
+        elapsed = time.time() - crime_data["start_time"]
+        remaining = max(0, crime_data["duration"] - elapsed)
+        
+        if remaining > 0:
+            progress_bar = create_progress_bar(elapsed, crime_data["duration"])
+            await message.reply_text(
+                f"⏳ Crime in progress: {crime_data['type_name']}\n"
+                f"{progress_bar}\n"
+                f"Estimated completion in: {int(remaining)} seconds"
+            )
+            return
+        else:
+            del crime_in_progress[user_id]
+    
+    # Create crime menu with difficulty levels
+    buttons = []
+    for crime_id, crime_info in CRIME_TYPES.items():
+        cooldown_expired = True
+        if user_id in crime_cooldowns and crime_id in crime_cooldowns[user_id]:
+            cooldown_end = crime_cooldowns[user_id][crime_id]
+            if datetime.now() < cooldown_end:
+                cooldown_expired = False
+                time_left = cooldown_end - datetime.now()
+                text = f"{crime_info['emoji']} {crime_info['name']} (⌛ {str(time_left).split('.')[0]})"
+                buttons.append([InlineKeyboardButton(text, callback_data="crime_cooldown")])
+            else:
+                del crime_cooldowns[user_id][crime_id]
+        
+        if cooldown_expired:
+            risk_level = "🟢 Low" if crime_info["jail_chance"] < 0.3 else "🟡 Medium" if crime_info["jail_chance"] < 0.6 else "🔴 High"
+            text = f"{crime_info['emoji']} {crime_info['name']} | Reward: ${crime_info['min_reward']}-{crime_info['max_reward']} | Risk: {risk_level}"
+            buttons.append([InlineKeyboardButton(text, callback_data=f"crime_start_{crime_id}")])
+    
+    # Add gang and leaderboard options
+    buttons.extend([
+        [InlineKeyboardButton("👥 Join/Create Gang", callback_data="crime_gang")],
+        [InlineKeyboardButton("🏆 Crime Leaderboard", callback_data="crime_leaderboard")]
+    ])
+    
+    await message.reply_text(
+        "🔫 **Underworld Crime Network** 🔫\n\n"
+        "Choose your operation carefully. Higher risk means higher reward but greater chance of getting caught!\n\n"
+        "💼 **Your Stats:**\n"
+        f"- Successful Crimes: {crime_leaderboard.get(user_id, {}).get('success', 0)}\n"
+        f"- Failed Crimes: {crime_leaderboard.get(user_id, {}).get('failed', 0)}\n"
+        f"- Times Jailed: {crime_leaderboard.get(user_id, {}).get('jailed', 0)}",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+def create_progress_bar(elapsed, total):
+    progress = min(1.0, elapsed / total)
+    filled = int(20 * progress)
+    return f"[{'█' * filled}{'░' * (20 - filled)}] {int(progress * 100)}%"
+
+@app.on_callback_query(filters.regex(r"crime_start_(\w+)"))
+async def start_crime(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    crime_id = callback_query.data.split("_")[-1]
+    crime_info = CRIME_TYPES[crime_id]
+    
+    # Set crime in progress
+    crime_duration = random.randint(10, 30)  # Crime takes 10-30 seconds
+    crime_in_progress[user_id] = {
+        "type": crime_id,
+        "type_name": crime_info["name"],
+        "start_time": time.time(),
+        "duration": crime_duration
+    }
+    
+    # Send crime initiation message with animation
+    msg = await callback_query.message.edit_text(
+        f"🕵️‍♂️ Initiating {crime_info['name']}...\n\n"
+        "Preparing equipment...\n"
+        "░░░░░░░░░░ 0%"
+    )
+    
+    # Animated preparation sequence
+    steps = [
+        "Scouting location...",
+        "Gathering crew...",
+        "Disabling security...",
+        "Executing plan..."
+    ]
+    
+    for i, step in enumerate(steps):
+        time.sleep(2)
+        progress = (i + 1) / len(steps)
+        progress_bar = create_progress_bar(progress, 1)
+        await msg.edit_text(
+            f"🕵️‍♂️ Initiating {crime_info['name']}...\n\n"
+            f"{step}\n"
+            f"{progress_bar}"
+        )
+    
+    await msg.edit_text(
+        f"🚀 {crime_info['name']} in progress!\n\n"
+        "Stay low and wait for completion...\n"
+        f"Estimated time: {crime_duration} seconds\n\n"
+        "Check back with /crime to see progress"
+    )
+    await callback_query.answer()
+
+@app.on_message(filters.command("completecrime"))
+async def complete_crime(client: Client, message: Message):
+    user_id = message.from_user.id
+    
+    if user_id not in crime_in_progress:
+        await message.reply_text("You don't have any active crimes!")
+        return
+    
+    crime_data = crime_in_progress[user_id]
+    elapsed = time.time() - crime_data["start_time"]
+    
+    if elapsed < crime_data["duration"]:
+        await message.reply_text(f"Crime not completed yet! {int(crime_data['duration'] - elapsed)} seconds remaining.")
+        return
+    
+    # Crime completion logic
+    crime_info = CRIME_TYPES[crime_data["type"]]
+    success = random.random() < crime_info["success_rate"]
+    jailed = random.random() < crime_info["jail_chance"] if not success else False
+    
+    # Get user data
+    user_data = await user_collection.find_one({"id": user_id})
+    current_balance = user_data.get("balance", 0) if user_data else 0
+    
+    # Initialize leaderboard stats
+    if user_id not in crime_leaderboard:
+        crime_leaderboard[user_id] = {"success": 0, "failed": 0, "jailed": 0}
+    
+    if success:
+        reward = random.randint(crime_info["min_reward"], crime_info["max_reward"])
+        new_balance = current_balance + reward
+        crime_leaderboard[user_id]["success"] += 1
+        
+        # Gang bonus if in a gang
+        gang_bonus = 0
+        for gang_id, gang_data in gangs.items():
+            if user_id in gang_data["members"]:
+                gang_bonus = int(reward * 0.1)  # 10% gang bonus
+                new_balance += gang_bonus
+                break
+        
+        response = (
+            f"🎉 **CRIME SUCCESSFUL!**\n\n"
+            f"💰 You stole: ${reward}\n"
+            f"🏦 New balance: ${new_balance}\n"
+            f"🕵️‍♂️ Crime: {crime_info['name']}\n\n"
+        )
+        
+        if gang_bonus > 0:
+            response += f"👥 Gang bonus: +${gang_bonus}\n\n"
+        
+        # Rare loot chance
+        if random.random() < 0.05:  # 5% chance for rare loot
+            rare_items = ["💎 Diamond", "🖼 Famous Painting", "🔑 VIP Access Card", "💿 Confidential Data"]
+            rare_item = random.choice(rare_items)
+            rare_value = random.randint(2000, 5000)
+            new_balance += rare_value
+            response += f"✨ **RARE LOOT!** Found {rare_item} worth ${rare_value}!\n"
+        
+        response += "🏃‍♂️ You escaped cleanly!"
+        
+    else:
+        penalty = random.randint(int(crime_info["min_reward"] * 0.5), int(crime_info["max_reward"] * 0.5))
+        new_balance = max(0, current_balance - penalty)
+        crime_leaderboard[user_id]["failed"] += 1
+        
+        if jailed:
+            jail_time = datetime.now() + timedelta(minutes=random.randint(5, 30))
+            jailed_users[user_id] = jail_time
+            crime_leaderboard[user_id]["jailed"] += 1
+            
+            response = (
+                f"🚨 **CAUGHT BY POLICE!**\n\n"
+                f"👮 You failed the {crime_info['name']} and got arrested!\n"
+                f"💸 Fine paid: ${penalty}\n"
+                f"⏳ Jail time: {str(jail_time - datetime.now()).split('.')[0]}\n\n"
+                "Use this time to reflect on your criminal ways..."
+            )
+        else:
+            response = (
+                f"😬 **CRIME FAILED!**\n\n"
+                f"💸 You lost ${penalty} in the botched {crime_info['name']}\n"
+                f"🏦 New balance: ${new_balance}\n\n"
+                "You managed to escape but came away empty-handed..."
+            )
+    
+    # Update user balance
+    await user_collection.update_one(
+        {"id": user_id},
+        {"$set": {"balance": new_balance}},
+        upsert=True
+    )
+    
+    # Set cooldown
+    if user_id not in crime_cooldowns:
+        crime_cooldowns[user_id] = {}
+    crime_cooldowns[user_id][crime_data["type"]] = datetime.now() + timedelta(seconds=crime_info["cooldown"])
+    
+    # Clean up
+    del crime_in_progress[user_id]
+    
+    # Send result with animation
+    msg = await message.reply_text("Calculating results...")
+    time.sleep(2)
+    
+    for _ in range(3):
+        await msg.edit_text("🔍 Reviewing security footage...")
+        time.sleep(1)
+        await msg.edit_text("📡 Tracing your steps...")
+        time.sleep(1)
+    
+    await msg.edit_text(response)
+
+@app.on_callback_query(filters.regex("crime_leaderboard"))
+async def show_leaderboard(client: Client, callback_query: CallbackQuery):
+    # Sort by successful crimes
+    sorted_users = sorted(
+        crime_leaderboard.items(),
+        key=lambda x: (x[1]["success"], -x[1]["jailed"]),
+        reverse=True
+    )[:10]
+    
+    leaderboard_text = "🏆 **Top Criminals** 🏆\n\n"
+    for rank, (user_id, stats) in enumerate(sorted_users, 1):
+        try:
+            user = await client.get_users(user_id)
+            name = user.first_name
+        except:
+            name = f"User {user_id}"
+        
+        leaderboard_text += (
+            f"{rank}. {name} - ✅ {stats['success']} | ❌ {stats['failed']} | 🚨 {stats['jailed']}\n"
+        )
+    
+    await callback_query.message.edit_text(
+        leaderboard_text,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 Back", callback_data="crime_back")]
+        ])
+    )
+
+@app.on_callback_query(filters.regex("crime_gang"))
+async def gang_menu(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    
+    # Check if user is in a gang
+    in_gang = False
+    user_gang = None
+    for gang_id, gang_data in gangs.items():
+        if user_id in gang_data["members"]:
+            in_gang = True
+            user_gang = gang_data
+            break
+    
+    if in_gang:
+        members_text = "\n".join([
+            f"👤 {member}" if member != user_gang["leader"] else f"👑 {member} (Leader)"
+            for member in user_gang["members"]
+        ])
+        
+        await callback_query.message.edit_text(
+            f"👥 **Your Gang: {user_gang['name']}**\n\n"
+            f"💰 Gang Fund: ${user_gang.get('fund', 0)}\n"
+            f"📅 Created: {user_gang['created_date']}\n\n"
+            f"**Members:**\n{members_text}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💸 Contribute to Gang Fund", callback_data="gang_contribute")],
+                [InlineKeyboardButton("🚪 Leave Gang", callback_data="gang_leave")],
+                [InlineKeyboardButton("🔙 Back", callback_data="crime_back")]
+            ])
+        )
+    else:
+        await callback_query.message.edit_text(
+            "🕶 **Gang Network**\n\n"
+            "Join or create a gang to get bonuses on crimes and special gang missions!\n\n"
+            "Gang benefits:\n"
+            "- 10% bonus on successful crimes\n"
+            "- Access to gang vault\n"
+            "- Special gang missions\n"
+            "- Protection from police raids",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🆕 Create Gang ($5000)", callback_data="gang_create")],
+                [InlineKeyboardButton("🔍 Join Gang", callback_data="gang_join")],
+                [InlineKeyboardButton("🔙 Back", callback_data="crime_back")]
+            ])
+        )
+
+@app.on_callback_query(filters.regex("crime_back"))
+async def back_to_menu(client: Client, callback_query: CallbackQuery):
+    await crime_menu(client, callback_query.message)
+
+# Gang Creation Handler
+@app.on_callback_query(filters.regex("gang_create"))
+async def create_gang(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    user_data = await user_collection.find_one({"id": user_id})
+    
+    # Safely fetch balance as integer
+    try:
+        balance = int(user_data.get("balance", 0))
+    except (ValueError, TypeError):
+        balance = 0  # If somehow invalid, fallback to 0
+
+    # Check if user has enough money
+    if balance < 5000:
+        await callback_query.answer("❌ You need $5000 to create a gang!", show_alert=True)
+        return
+    
+    # Check if user is already in a gang
+    for gang_id, gang_data in gangs.items():
+        if user_id in gang_data["members"]:
+            await callback_query.answer("❌ You're already in a gang!", show_alert=True)
+            return
+    
+    # Ask for gang name
+    await callback_query.message.edit_text(
+        "🆕 **Create a New Gang**\n\n"
+        "Enter your gang name (3-20 characters):\n\n"
+        "⚠️ This will cost $5000 from your balance",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 Cancel", callback_data="crime_gang")]
+        ])
+    )
+    
+    # Store temporary state for gang creation
+    crime_in_progress[user_id] = {
+        "action": "awaiting_gang_name",
+        "start_time": time.time()
+    }
+
+# Gang Name Handler
+@app.on_message(filters.text & filters.private & ~filters.create(filters.command))
+async def handle_gang_name(client: Client, message: Message):
+    user_id = message.from_user.id
+
+    if user_id not in crime_in_progress or crime_in_progress[user_id].get("action") != "awaiting_gang_name":
+        return
+
+    gang_name = message.text.strip()
+
+    # Validate gang name
+    if len(gang_name) < 3 or len(gang_name) > 20:
+        await message.reply_text(
+            "❌ Gang name must be 3-20 characters!",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="crime_gang")]
+            ])
+        )
+        del crime_in_progress[user_id]
+        return
+
+    # Check if gang name already exists
+    for gang_id, gang_data in gangs.items():
+        if gang_data["name"].lower() == gang_name.lower():
+            await message.reply_text(
+                "❌ Gang name already taken!",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Back", callback_data="crime_gang")]
+                ])
+            )
+            del crime_in_progress[user_id]
+            return
+
+    # Deduct money and create gang
+    user_data = await user_collection.find_one({"id": user_id})
+    new_balance = user_data["balance"] - 5000
+
+    gang_id = f"gang_{random.randint(1000, 9999)}"
+    gangs[gang_id] = {
+        "id": gang_id,
+        "name": gang_name,
+        "leader": user_id,
+        "members": [user_id],
+        "fund": 0,
+        "created_date": datetime.now().strftime("%Y-%m-%d"),
+        "level": 1,
+        "reputation": 0
+    }
+
+    # Update user balance
+    await user_collection.update_one(
+        {"id": user_id},
+        {"$set": {"balance": new_balance}},
+        upsert=True
+    )
+
+    # Send confirmation
+    await message.reply_text(
+        f"🎉 **Gang Created!**\n\n"
+        f"👥 Name: {gang_name}\n"
+        f"👑 Leader: You\n"
+        f"💰 Creation Cost: $5000\n"
+        f"💵 Your New Balance: ${new_balance}\n\n"
+        "Use /gang to manage your gang",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("👥 View Gang", callback_data="crime_gang")]
+        ])
+    )
+
+    del crime_in_progress[user_id]
+
+# Gang Join Handler
+@app.on_callback_query(filters.regex("gang_join"))
+async def join_gang_menu(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    
+    # Check if user is already in a gang
+    for gang_id, gang_data in gangs.items():
+        if user_id in gang_data["members"]:
+            await callback_query.answer("❌ You're already in a gang!", show_alert=True)
+            return
+    
+    # Show available gangs
+    available_gangs = []
+    for gang_id, gang_data in gangs.items():
+        if len(gang_data["members"]) < 10:  # Max 10 members per gang
+            available_gangs.append(gang_data)
+    
+    if not available_gangs:
+        await callback_query.message.edit_text(
+            "❌ No gangs are currently accepting members!\n"
+            "You can create your own gang instead.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🆕 Create Gang", callback_data="gang_create")],
+                [InlineKeyboardButton("🔙 Back", callback_data="crime_gang")]
+            ])
+        )
+        return
+    
+    buttons = []
+    for gang in available_gangs[:5]:  # Show max 5 gangs
+        members_count = len(gang["members"])
+        buttons.append([
+            InlineKeyboardButton(
+                f"{gang['name']} (Members: {members_count}/10)",
+                callback_data=f"gang_join_{gang['id']}"
+            )
+        ])
+    
+    buttons.append([InlineKeyboardButton("🔙 Back", callback_data="crime_gang")])
+    
+    await callback_query.message.edit_text(
+        "🔍 **Available Gangs**\n\n"
+        "Select a gang to join:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+# Gang Join Confirm Handler
+@app.on_callback_query(filters.regex(r"gang_join_(\w+)"))
+async def join_gang_confirm(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    gang_id = callback_query.data.split("_")[-1]
+    
+    # Check if user is already in a gang
+    for g_id, gang_data in gangs.items():
+        if user_id in gang_data["members"]:
+            await callback_query.answer("❌ You're already in a gang!", show_alert=True)
+            return
+    
+    # Add user to gang
+    if gang_id in gangs:
+        if len(gangs[gang_id]["members"]) >= 10:
+            await callback_query.answer("❌ Gang is full!", show_alert=True)
+            return
+        
+        gangs[gang_id]["members"].append(user_id)
+        
+        # Notify gang members
+        gang_name = gangs[gang_id]["name"]
+        try:
+            leader = await client.get_users(gangs[gang_id]["leader"])
+            leader_name = leader.first_name
+        except:
+            leader_name = "Unknown"
+        
+        await callback_query.message.edit_text(
+            f"🎉 You've joined {gang_name}!\n\n"
+            f"👑 Leader: {leader_name}\n"
+            f"👥 Members: {len(gangs[gang_id]['members'])}/10\n\n"
+            "You now get 10% bonus on successful crimes!",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("👥 View Gang", callback_data="crime_gang")]
+            ])
+        )
+        
+        # Notify gang leader
+        try:
+            await client.send_message(
+                gangs[gang_id]["leader"],
+                f"👤 {callback_query.from_user.first_name} has joined your gang {gang_name}!"
+            )
+        except:
+            pass
+
+# Gang Leave Handler
+@app.on_callback_query(filters.regex("gang_leave"))
+async def leave_gang_confirm(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    
+    # Find user's gang
+    user_gang = None
+    for gang_id, gang_data in gangs.items():
+        if user_id in gang_data["members"]:
+            user_gang = gang_data
+            break
+    
+    if not user_gang:
+        await callback_query.answer("❌ You're not in a gang!", show_alert=True)
+        return
+    
+    # Check if leader
+    if user_id == user_gang["leader"]:
+        await callback_query.message.edit_text(
+            "⚠️ **You're the gang leader!**\n\n"
+            "You can't leave the gang, you must either:\n"
+            "1. Transfer leadership first\n"
+            "2. Disband the gang completely\n\n"
+            "What would you like to do?",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("👑 Transfer Leadership", callback_data="gang_transfer"),
+                    InlineKeyboardButton("💣 Disband Gang", callback_data="gang_disband")
+                ],
+                [InlineKeyboardButton("🔙 Cancel", callback_data="crime_gang")]
+            ])
+        )
+        return
+    
+    # Confirm leave
+    await callback_query.message.edit_text(
+        f"⚠️ **Leave {user_gang['name']}?**\n\n"
+        "You will lose all gang benefits and need to wait 24 hours before joining another gang.",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Yes, Leave", callback_data=f"gang_leave_confirm_{user_gang['id']}"),
+                InlineKeyboardButton("❌ Cancel", callback_data="crime_gang")
+            ]
+        ])
+    )
+
+# Gang Leave Confirm Handler
+@app.on_callback_query(filters.regex(r"gang_leave_confirm_(\w+)"))
+async def leave_gang_execute(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    gang_id = callback_query.data.split("_")[-1]
+    
+    if gang_id in gangs and user_id in gangs[gang_id]["members"]:
+        gangs[gang_id]["members"].remove(user_id)
+        gang_name = gangs[gang_id]["name"]
+        
+        # Set cooldown
+        if user_id not in crime_cooldowns:
+            crime_cooldowns[user_id] = {}
+        crime_cooldowns[user_id]["gang_join"] = datetime.now() + timedelta(hours=24)
+        
+        await callback_query.message.edit_text(
+            f"🚪 You've left {gang_name}!\n\n"
+            "You can join another gang after 24 hours.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="crime_gang")]
+            ])
+        )
+        
+        # Notify gang leader
+        try:
+            await client.send_message(
+                gangs[gang_id]["leader"],
+                f"👤 {callback_query.from_user.first_name} has left your gang {gang_name}!"
+            )
+        except:
+            pass
+        
+        # Delete gang if empty
+        if len(gangs[gang_id]["members"]) == 0:
+            del gangs[gang_id]
+
+# Gang Transfer Leadership Handler
+@app.on_callback_query(filters.regex("gang_transfer"))
+async def transfer_leadership_menu(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    
+    # Find user's gang
+    user_gang = None
+    for gang_id, gang_data in gangs.items():
+        if user_id == gang_data["leader"]:
+            user_gang = gang_data
+            break
+    
+    if not user_gang:
+        await callback_query.answer("❌ You're not a gang leader!", show_alert=True)
+        return
+    
+    # Create member list
+    buttons = []
+    for member_id in user_gang["members"]:
+        if member_id != user_id:  # Can't transfer to yourself
+            try:
+                member = await client.get_users(member_id)
+                name = member.first_name
+            except:
+                name = f"User {member_id}"
+            
+            buttons.append([
+                InlineKeyboardButton(
+                    f"👤 {name}",
+                    callback_data=f"gang_transfer_to_{member_id}"
+                )
+            ])
+    
+    if not buttons:
+        await callback_query.message.edit_text(
+            "❌ You're the only member in your gang!\n"
+            "You must either recruit members or disband the gang.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💣 Disband Gang", callback_data="gang_disband")],
+                [InlineKeyboardButton("🔙 Back", callback_data="crime_gang")]
+            ])
+        )
+        return
+    
+    buttons.append([InlineKeyboardButton("🔙 Cancel", callback_data="crime_gang")])
+    
+    await callback_query.message.edit_text(
+        "👑 **Transfer Gang Leadership**\n\n"
+        "Select a member to make the new leader:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+# Gang Transfer Execute Handler
+@app.on_callback_query(filters.regex(r"gang_transfer_to_(\d+)"))
+async def transfer_leadership_execute(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    new_leader_id = int(callback_query.data.split("_")[-1])
+    
+    # Find user's gang
+    user_gang = None
+    for gang_id, gang_data in gangs.items():
+        if user_id == gang_data["leader"]:
+            user_gang = gang_data
+            break
+    
+    if not user_gang or new_leader_id not in user_gang["members"]:
+        await callback_query.answer("❌ Invalid selection!", show_alert=True)
+        return
+    
+    # Transfer leadership
+    user_gang["leader"] = new_leader_id
+    gang_name = user_gang["name"]
+    
+    try:
+        new_leader = await client.get_users(new_leader_id)
+        new_leader_name = new_leader.first_name
+    except:
+        new_leader_name = f"User {new_leader_id}"
+    
+    await callback_query.message.edit_text(
+        f"👑 Leadership of {gang_name} transferred to {new_leader_name}!",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("👥 View Gang", callback_data="crime_gang")]
+        ])
+    )
+    
+    # Notify new leader
+    try:
+        await client.send_message(
+            new_leader_id,
+            f"👑 You've been made the new leader of {gang_name} by {callback_query.from_user.first_name}!"
+        )
+    except:
+        pass
+
+# Gang Disband Handler
+@app.on_callback_query(filters.regex("gang_disband"))
+async def disband_gang_confirm(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    
+    # Find user's gang
+    user_gang = None
+    for gang_id, gang_data in gangs.items():
+        if user_id == gang_data["leader"]:
+            user_gang = gang_data
+            break
+    
+    if not user_gang:
+        await callback_query.answer("❌ You're not a gang leader!", show_alert=True)
+        return
+    
+    await callback_query.message.edit_text(
+        f"💣 **Disband {user_gang['name']}?**\n\n"
+        "This will permanently delete the gang and:\n"
+        f"- Remove all {len(user_gang['members'])} members\n"
+        f"- Lose the gang fund (${user_gang.get('fund', 0)})\n\n"
+        "This action cannot be undone!",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("💣 Confirm Disband", callback_data=f"gang_disband_confirm_{user_gang['id']}"),
+                InlineKeyboardButton("❌ Cancel", callback_data="crime_gang")
+            ]
+        ])
+    )
+
+# Gang Disband Execute Handler
+@app.on_callback_query(filters.regex(r"gang_disband_confirm_(\w+)"))
+async def disband_gang_execute(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    gang_id = callback_query.data.split("_")[-1]
+    
+    if gang_id in gangs and user_id == gangs[gang_id]["leader"]:
+        gang_name = gangs[gang_id]["name"]
+        member_ids = gangs[gang_id]["members"].copy()
+        
+        # Notify members
+        for member_id in member_ids:
+            if member_id != user_id:  # Don't notify yourself
+                try:
+                    await client.send_message(
+                        member_id,
+                        f"💣 Your gang {gang_name} has been disbanded by the leader!"
+                    )
+                except:
+                    pass
+        
+        # Delete gang
+        del gangs[gang_id]
+        
+        await callback_query.message.edit_text(
+            f"💥 {gang_name} has been disbanded!",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back", callback_data="crime_gang")]
+            ])
+        )
+
+# Gang Contribute Handler
+@app.on_callback_query(filters.regex("gang_contribute"))
+async def contribute_to_gang(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    
+    # Find user's gang
+    user_gang = None
+    for gang_id, gang_data in gangs.items():
+        if user_id in gang_data["members"]:
+            user_gang = gang_data
+            break
+    
+    if not user_gang:
+        await callback_query.answer("❌ You're not in a gang!", show_alert=True)
+        return
+    
+    await callback_query.message.edit_text(
+        f"💸 **Contribute to {user_gang['name']}'s Fund**\n\n"
+        "Current Gang Fund: ${}\n"
+        "Enter the amount you want to contribute:".format(user_gang.get("fund", 0)),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 Back", callback_data="crime_gang")]
+        ])
+    )
+    
+    # Store temporary state for contribution
+    crime_in_progress[user_id] = {
+        "action": "awaiting_gang_contribution",
+        "gang_id": user_gang["id"],
+        "start_time": time.time()
+    }
+
+# Gang Contribution Handler
+@app.on_message(filters.text & filters.private & ~filters.create(filters.command))
+async def handle_gang_contribution(client: Client, message: Message):
+    user_id = message.from_user.id
+    
+    if (user_id not in crime_in_progress or 
+        crime_in_progress[user_id].get("action") != "awaiting_gang_contribution"):
+        return
+    
+    try:
+        amount = int(message.text.strip())
+        if amount <= 0:
+            raise ValueError
+    except:
+        await message.reply_text("❌ Please enter a valid positive number!", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 Back", callback_data="crime_gang")]
+        ]))
+        del crime_in_progress[user_id]
+        return
+    
+    gang_id = crime_in_progress[user_id]["gang_id"]
+    user_data = await user_collection.find_one({"id": user_id})
+    
+    # Check if user has enough money
+    if user_data.get("balance", 0) < amount:
+        await message.reply_text("❌ You don't have enough money!", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 Back", callback_data="crime_gang")]
+        ]))
+        del crime_in_progress[user_id]
+        return
+    
+    # Process contribution
+    new_balance = user_data["balance"] - amount
+    gangs[gang_id]["fund"] = gangs[gang_id].get("fund", 0) + amount
+    
+    # Update user balance
+    await user_collection.update_one(
+        {"id": user_id},
+        {"$set": {"balance": new_balance}},
+        upsert=True
+    )
+    
+    await message.reply_text(
+        f"✅ You contributed ${amount} to {gangs[gang_id]['name']}'s fund!\n\n"
+        f"💵 New Gang Fund: ${gangs[gang_id]['fund']}\n"
+        f"💰 Your New Balance: ${new_balance}",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("👥 View Gang", callback_data="crime_gang")]
+        ])
+    )
+    
+    del crime_in_progress[user_id]
+
+# Gang Mission Handler (Example - would need expansion)
+@app.on_callback_query(filters.regex("gang_mission"))
+async def gang_mission_menu(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    
+    # Find user's gang
+    user_gang = None
+    for gang_id, gang_data in gangs.items():
+        if user_id in gang_data["members"]:
+            user_gang = gang_data
+            break
+    
+    if not user_gang:
+        await callback_query.answer("❌ You're not in a gang!", show_alert=True)
+        return
+    
+    await callback_query.message.edit_text(
+        f"🎯 **Gang Missions - {user_gang['name']}**\n\n"
+        "Available Missions:\n\n"
+        "1. Bank Heist (Requires 3 members)\n"
+        "   Reward: $15,000 + 50 Reputation\n\n"
+        "2. Casino Robbery (Requires 5 members)\n"
+        "   Reward: $30,000 + 100 Reputation\n\n"
+        "3. Data Theft (Requires 2 members)\n"
+        "   Reward: $10,000 + 30 Reputation\n\n"
+        "Gang Reputation: {}\n".format(user_gang.get("reputation", 0)),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏦 Bank Heist", callback_data="gang_mission_start_1")],
+            [InlineKeyboardButton("🎰 Casino Robbery", callback_data="gang_mission_start_2")],
+            [InlineKeyboardButton("💻 Data Theft", callback_data="gang_mission_start_3")],
+            [InlineKeyboardButton("🔙 Back", callback_data="crime_gang")]
+        ])
+    )

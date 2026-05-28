@@ -1,0 +1,137 @@
+from pyrogram import Client, filters
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
+import time
+import random
+from . import app, user_collection
+from .block import block_dec
+
+# Weapon data
+weapons_data = [
+    {'name': '⚔️ Sword', 'price': 500, 'damage': 10},
+    {'name': '🏹 Bow', 'price': 800, 'damage': 15},
+    {'name': '🔮 Staff', 'price': 1000, 'damage': 20},
+    {'name': '🔪 Knife', 'price': 200, 'damage': 5},
+    {'name': '🎯 Sniper', 'price': 5000, 'damage': 30}
+]
+
+# Show available weapons to buy
+async def weapons(client, message, user_id):
+    user_data = await user_collection.find_one({'id': user_id})
+    if not user_data:
+        await message.reply_text("❗ Please start the bot first.")
+        return
+
+    current_gold = user_data.get('gold', 0)
+    owned_weapons = set(w['name'] for w in user_data.get('weapons', []))
+    keyboard, row = [], []
+
+    for i, weapon in enumerate(weapons_data, 1):
+        if weapon['name'] in owned_weapons:
+            button = InlineKeyboardButton(f"{weapon['name']} ✅", callback_data="owned")
+        else:
+            button = InlineKeyboardButton(f"{weapon['name']} - {weapon['price']} 🪙", callback_data=f"buy_weapon:{weapon['name']}:{weapon['price']}")
+        row.append(button)
+        if i % 2 == 0 or i == len(weapons_data):
+            keyboard.append(row)
+            row = []
+
+    await message.reply_text(
+        f"🛒 **Weapon Shop**\n\nYou have: **{current_gold} 🪙**\nChoose a weapon to buy:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# Remove expired weapons after 7 days
+async def remove_expired_weapons(user_id: int):
+    user_data = await user_collection.find_one({'id': user_id})
+    if user_data and 'weapons' in user_data:
+        current_time = time.time()
+        valid_weapons = [w for w in user_data['weapons'] if (current_time - w.get('purchase_time', 0)) <= 604800]
+        await user_collection.update_one({'id': user_id}, {'$set': {'weapons': valid_weapons}})
+
+# Handle weapon purchase
+async def handle_buy_weapon(client, cb: CallbackQuery, user_id):
+    data = cb.data.split(':')
+    if len(data) != 3:
+        return await cb.answer("Invalid selection.")
+    name, price = data[1], int(data[2])
+    user = await user_collection.find_one({'id': user_id})
+    if not user or user['gold'] < price:
+        return await cb.answer("❌ Not enough gold.")
+    if any(w['name'] == name for w in user.get('weapons', [])):
+        return await cb.answer("You already own this.")
+
+    # Purchase
+    await user_collection.update_one({'id': user_id}, {'$inc': {'gold': -price}})
+    new_weapon = {
+        'name': name,
+        'damage': next((w['damage'] for w in weapons_data if w['name'] == name), 0),
+        'purchase_time': time.time()
+    }
+    await user_collection.update_one({'id': user_id}, {'$push': {'weapons': new_weapon}})
+    await cb.answer(f"Purchased {name}!")
+    await cb.edit_message_text(f"✅ You bought {name} for {price} 🪙!")
+    await remove_expired_weapons(user_id)
+
+# Equip a weapon
+@app.on_message(filters.command("equip"))
+@block_dec
+async def equip_weapon(client, message: Message):
+    user_id = message.from_user.id
+    user = await user_collection.find_one({'id': user_id})
+    weapons = user.get('weapons', [])
+
+    if not weapons:
+        return await message.reply("⚠️ You don't own any weapons.")
+
+    buttons = [[InlineKeyboardButton(w['name'], callback_data=f"equip:{w['name']}")] for w in weapons]
+    await message.reply("🛡️ Select a weapon to equip:", reply_markup=InlineKeyboardMarkup(buttons))
+
+@app.on_callback_query(filters.regex(r'^equip:'))
+async def equip_cb(client, cb: CallbackQuery):
+    name = cb.data.split(':')[1]
+    await user_collection.update_one({'id': cb.from_user.id}, {'$set': {'equipped_weapon': name}})
+    await cb.answer(f"Equipped {name}")
+    await cb.edit_message_text(f"🗡️ Equipped {name} successfully.")
+
+# Battle command
+@app.on_message(filters.command("catch"))
+@block_dec
+async def battle(client, message: Message):
+    user_id = message.from_user.id
+    user = await user_collection.find_one({'id': user_id})
+    equipped = user.get('equipped_weapon')
+    if not equipped:
+        return await message.reply("⚔️ Equip a weapon first using /equip")
+
+    weapon = next((w for w in user.get('weapons', []) if w['name'] == equipped), None)
+    if not weapon:
+        return await message.reply("❌ Invalid weapon.")
+
+    damage = weapon.get('damage', 0)
+    enemy_health = random.randint(20, 50)
+    gold_earned = 0
+
+    battle_log = f"🧟‍ Enemy HP: {enemy_health}\n🗡️ Your Weapon: {equipped} (Damage: {damage})\n\n"
+    while enemy_health > 0:
+        attack = damage + random.randint(-3, 5)
+        attack = max(1, attack)
+        enemy_health -= attack
+        battle_log += f"⚔️ You hit: {attack} dmg → Enemy HP: {max(enemy_health, 0)}\n"
+        time.sleep(0.1)
+
+    gold_earned = random.randint(50, 150)
+    await user_collection.update_one({'id': user_id}, {'$inc': {'gold': gold_earned}})
+    battle_log += f"\n🏆 Victory! You earned {gold_earned} 🪙"
+    await message.reply(battle_log)
+
+# Commands
+@app.on_message(filters.command("weapons"))
+@block_dec
+async def cmd_weapons(client, message: Message):
+    user_id = message.from_user.id
+    await weapons(client, message, user_id)
+
+@app.on_callback_query(filters.regex(r'^buy_weapon:'))
+async def cbk_buy_weapon(client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    await handle_buy_weapon(client, callback_query, user_id)

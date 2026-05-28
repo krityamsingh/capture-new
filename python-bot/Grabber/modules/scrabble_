@@ -1,0 +1,246 @@
+import asyncio
+import random
+import time
+from datetime import datetime, timedelta
+from pytz import timezone
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+
+# Game Constants
+MAX_ATTEMPTS = 5
+DAILY_WIN_LIMIT = 5
+COOLDOWN_TIME = 20
+STREAK_BONUS = 50
+POWERUP_COST = 30
+LEADERBOARD_SIZE = 10
+
+# Game State
+active_games = {}
+cooldown_users = {}
+powerups = {
+    "reveal": "🔍 Reveal 1 Letter (Cost: 30 gold)",
+    "reshuffle": "🔀 Reshuffle Letters (Cost: 30 gold)",
+    "solve": "💡 Solve Instantly (Cost: 100 gold)"
+}
+
+class GameSession:
+    def __init__(self, character, word):
+        self.character = character
+        self.original_word = word
+        self.scrambled_word = self._scramble_word(word)
+        self.attempts = 0
+        self.hints_used = 0
+        self.start_time = time.time()
+        self.revealed_letters = set()
+    
+    def _scramble_word(self, word):
+        word_list = list(word)
+        while True:
+            random.shuffle(word_list)
+            scrambled = ''.join(word_list)
+            if scrambled.lower() != word.lower():
+                return scrambled
+    
+    def get_hint(self):
+        self.hints_used += 1
+        hidden = [letter if i in self.revealed_letters else '_' 
+                 for i, letter in enumerate(self.original_word)]
+        return ''.join(hidden)
+    
+    def use_powerup(self, powerup_type):
+        if powerup_type == "reveal":
+            hidden_indices = [i for i in range(len(self.original_word)) 
+                            if i not in self.revealed_letters]
+            if hidden_indices:
+                self.revealed_letters.add(random.choice(hidden_indices))
+        elif powerup_type == "reshuffle":
+            self.scrambled_word = self._scramble_word(self.original_word)
+        return self.get_hint()
+
+def calculate_score(game_time, attempts, hints_used):
+    time_bonus = max(0, 300 - game_time) // 10
+    attempt_penalty = attempts * 5
+    hint_penalty = hints_used * 10
+    return max(50, 100 + time_bonus - attempt_penalty - hint_penalty)
+
+async def get_character(collection):
+    pipeline = [
+        {"$match": {"name": {"$exists": True, "$ne": ""}}},
+        {"$sample": {"size": 1}}
+    ]
+    return await collection.aggregate(pipeline).next()
+
+async def update_user_stats(user_collection, user_id, score_change, win=False):
+    now = datetime.now()
+    user_data = await user_collection.find_one({'id': user_id}) or {
+        'id': user_id,
+        'wins': 0,
+        'gold': 100,
+        'streak': 0,
+        'last_win': now - timedelta(days=2),
+        'total_score': 0,
+        'games_played': 0
+    }
+    
+    if win:
+        # Streak calculation
+        if (now.date() - user_data['last_win'].date()).days == 1:
+            user_data['streak'] += 1
+        elif (now.date() - user_data['last_win'].date()).days > 1:
+            user_data['streak'] = 1
+        
+        # Daily win limit check
+        if user_data.get('last_win', now).date() == now.date():
+            if user_data.get('daily_wins', 0) >= DAILY_WIN_LIMIT:
+                return False
+        
+        user_data['wins'] = user_data.get('wins', 0) + 1
+        user_data['daily_wins'] = user_data.get('daily_wins', 0) + 1
+        user_data['last_win'] = now
+        
+        # Streak bonus
+        if user_data['streak'] % 7 == 0:
+            score_change += STREAK_BONUS
+    
+    user_data['gold'] = user_data.get('gold', 100) + score_change
+    user_data['total_score'] = user_data.get('total_score', 0) + score_change
+    user_data['games_played'] = user_data.get('games_played', 0) + 1
+    
+    await user_collection.replace_one({'id': user_id}, user_data, upsert=True)
+    return True
+
+async def get_leaderboard(user_collection):
+    pipeline = [
+        {"$sort": {"total_score": -1}},
+        {"$limit": LEADERBOARD_SIZE},
+        {"$project": {
+            "username": 1,
+            "total_score": 1,
+            "wins": 1,
+            "streak": 1,
+            "gold": 1
+        }}
+    ]
+    return await user_collection.aggregate(pipeline).to_list(length=None)
+
+def create_powerup_keyboard(user_gold):
+    buttons = []
+    for powerup, desc in powerups.items():
+        cost = int(desc.split(":")[1].strip().split()[0])
+        disabled = user_gold < cost
+        text = f"{desc} {'(❌)' if disabled else ''}"
+        callback = f"powerup_{powerup}" if not disabled else "powerup_disabled"
+        buttons.append([InlineKeyboardButton(text, callback_data=callback)])
+    return InlineKeyboardMarkup(buttons)
+
+async def clear_cooldowns():
+    while True:
+        await asyncio.sleep(60)
+        now = time.time()
+        expired = [uid for uid, t in cooldown_users.items() if now - t > COOLDOWN_TIME]
+        for uid in expired:
+            cooldown_users.pop(uid, None)
+
+# Start the cooldown cleaner as a background task
+asyncio.create_task(clear_cooldowns())
+
+@app.on_message(filters.command(["scrabble", "wordgame"]))
+@block_dec
+@nopvt
+async def start_game(client, message: Message):
+    user_id = message.from_user.id
+    username = message.from_user.first_name
+    
+    if user_id in temp_block and time.time() < temp_block[user_id]:
+        return
+    
+    # Cooldown check
+    if user_id in cooldown_users:
+        remaining = COOLDOWN_TIME - (time.time() - cooldown_users[user_id])
+        if remaining > 0:
+            return await message.reply_text(
+                f"⏳ {username}, you're on cooldown! "
+                f"Wait `{int(remaining)}s` before starting a new game."
+            )
+    
+    # Existing game check
+    if user_id in active_games:
+        return await message.reply_text(
+            f"🎮 {username}, you already have an active game!\n"
+            f"Type your answer or use `/quitgame` to end it."
+        )
+    
+    # Get character and start game
+    character = await get_character(collection)
+    if not character:
+        return await message.reply_text("⚠️ Database error. Try again later!")
+    
+    word = character['name'].split()[0].lower()
+    if len(word) < 4:
+        return await start_game(client, message)  # Retry with longer word
+    
+    active_games[user_id] = GameSession(character, word)
+    game = active_games[user_id]
+    
+    await message.reply_text(
+        f"🌟 **WORD MASTER CHALLENGE** ����\n\n"
+        f"👤 Player: {username}\n"
+        f"🔤 Scrambled: `{game.scrambled_word}`\n"
+        f"⏱️ Time Bonus: Up to +30 points\n"
+        f"💡 Hints: {MAX_ATTEMPTS//2} available\n\n"
+        f"🏆 **Daily Goal**: Solve {DAILY_WIN_LIMIT} puzzles for bonus rewards!\n"
+        f"🔥 Streak Bonus: Every 7 days\n\n"
+        f"Type your answer or use /quitgame to exit.\n"
+        f"Need help? Try /hint or /powerups"
+    )
+
+@app.on_message(filters.command(["quitgame", "xscrabble"]))
+async def quit_game(client, message: Message):
+    user_id = message.from_user.id
+    if user_id in active_games:
+        game = active_games.pop(user_id)
+        elapsed = int(time.time() - game.start_time)
+        await message.reply_text(
+            f"🏳️ Game ended!\n"
+            f"The word was: `{game.original_word}`\n"
+            f"⏱️ You played for {elapsed}s\n\n"
+            f"🔁 Use /scrabble to play again!"
+        )
+    else:
+        await message.reply_text("ℹ️ You don't have an active game to quit.")
+
+# ... [rest of your handlers remain the same] ...
+
+async def handle_correct_answer(user_id, game, message):
+    game_time = time.time() - game.start_time
+    score = calculate_score(game_time, game.attempts, game.hints_used)
+    success = await update_user_stats(user_collection, user_id, score, win=True)
+    
+    if not success:
+        await message.reply_text(
+            f"✅ Correct! But you've reached your daily limit of {DAILY_WIN_LIMIT} wins.\n"
+            f"Come back tomorrow for more challenges!"
+        )
+        return
+    
+    character = game.character
+    del active_games[user_id]
+    cooldown_users[user_id] = time.time()
+    
+    win_msg = (
+        f"🎉 **WORD MASTER!** 🎉\n\n"
+        f"🔓 Solved: `{game.original_word}`\n"
+        f"⏱️ Time: {int(game_time)}s\n"
+        f"⭐ Score: +{score} points\n"
+        f"💰 Gold earned: +{score//2}\n\n"
+        f"{'🔥 Streak bonus applied!' if score > 100 else ''}"
+        f"Use /scrabble to play again!"
+    )
+    
+    if character.get("img_url"):
+        await message.reply_photo(
+            photo=character["img_url"],
+            caption=win_msg
+        )
+    else:
+        await message.reply_text(win_msg)

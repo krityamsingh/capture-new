@@ -1,0 +1,434 @@
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from . import app, user_collection
+import random
+import time
+from datetime import timedelta
+
+# Currency Configuration
+CURRENCIES = {
+    "gold": {
+        "emoji": "🪙",
+        "name": "Gold",
+        "symbol": "₲",
+        "tax_rate": 0.05,  # 5% tax
+        "exchange_rates": {
+            "rubies": 0.2,  # 1 Gold = 0.2 Rubies
+            "tokens": 5.0    # 1 Gold = 5 Tokens
+        }
+    },
+    "rubies": {
+        "emoji": "💎",
+        "name": "Rubies",
+        "symbol": "♦️",
+        "tax_rate": 0.07,  # 7% tax
+        "exchange_rates": {
+            "gold": 5.0,    # 1 Ruby = 5 Gold
+            "tokens": 25.0   # 1 Ruby = 25 Tokens
+        }
+    },
+    "tokens": {
+        "emoji": "🪙",
+        "name": "Tokens",
+        "symbol": "Ⓣ",
+        "tax_rate": 0.03,  # 3% tax
+        "exchange_rates": {
+            "gold": 0.2,    # 1 Token = 0.2 Gold
+            "rubies": 0.04  # 1 Token = 0.04 Rubies
+        }
+    }
+}
+
+# Conversion cooldown (1 hour)
+CONVERSION_COOLDOWN = 3600
+BOT_TAX_RATE = 0.02  # 2% bot tax
+OWNER_ID = 7861332030  # Replace with your owner ID
+
+def format_currency(amount, currency):
+    """Format currency amount with symbol"""
+    config = CURRENCIES[currency]
+    return f"{amount:,.2f}{config['symbol']}"
+
+async def get_user_conversion_data(user_id):
+    """Get user's conversion data including last conversion time"""
+    user_data = await user_collection.find_one(
+        {'id': user_id},
+        projection={
+            'conversion_data': 1,
+            'gold': 1,
+            'rubies': 1,
+            'tokens': 1,
+            'first_conversion': 1
+        }
+    )
+    
+    if not user_data:
+        return None
+        
+    return {
+        "conversion_data": user_data.get("conversion_data", {}),
+        "balances": {
+            "gold": float(user_data.get("gold", 0)),
+            "rubies": float(user_data.get("rubies", 0)),
+            "tokens": float(user_data.get("tokens", 0))
+        },
+        "first_conversion": user_data.get("first_conversion", True)
+    }
+
+async def update_user_balance(user_id, currency, amount):
+    """Update user's balance for a specific currency"""
+    await user_collection.update_one(
+        {'id': user_id},
+        {'$inc': {currency: amount}},
+        upsert=True
+    )
+
+async def log_conversion(user_id, from_currency, to_currency, amount):
+    """Log the conversion and update last conversion time"""
+    now = time.time()
+    await user_collection.update_one(
+        {'id': user_id},
+        {
+            '$set': {
+                'conversion_data.last_conversion': now,
+                'first_conversion': False
+            },
+            '$inc': {
+                f'conversion_stats.{from_currency}_to_{to_currency}.total': amount,
+                f'conversion_stats.{from_currency}_to_{to_currency}.count': 1
+            }
+        },
+        upsert=True
+    )
+
+def calculate_taxes(amount, from_currency, to_currency, first_time=False):
+    """Calculate all applicable taxes"""
+    if first_time:
+        return 0, 0, 0  # No taxes for first conversion
+    
+    currency_tax = amount * CURRENCIES[from_currency]["tax_rate"]
+    bot_tax = amount * BOT_TAX_RATE
+    total_tax = currency_tax + bot_tax
+    
+    return total_tax, currency_tax, bot_tax
+
+def create_conversion_keyboard():
+    """Create inline keyboard for currency selection"""
+    buttons = []
+    for currency in CURRENCIES:
+        buttons.append(
+            InlineKeyboardButton(
+                text=f"{CURRENCIES[currency]['emoji']} {CURRENCIES[currency]['name']}",
+                callback_data=f"convert_select_{currency}"
+            )
+        )
+    
+    return InlineKeyboardMarkup([buttons])
+
+@app.on_message(filters.command(["convert", "exchange"]))
+async def start_conversion(client: Client, message: Message):
+    user = message.from_user
+    if not user:
+        await message.reply_text("⚠️ Please use this command in private chat or identify yourself.")
+        return
+    
+    user_id = user.id
+    user_data = await get_user_conversion_data(user_id)
+    
+    if not user_data:
+        await message.reply_text("❌ You don't have any currencies to convert!")
+        return
+    
+    # Check if user has any balance at all
+    has_balance = any(balance > 0 for balance in user_data["balances"].values())
+    if not has_balance:
+        await message.reply_text("❌ You don't have any currencies to convert!")
+        return
+    
+    # Check cooldown
+    last_conversion = user_data["conversion_data"].get("last_conversion", 0)
+    remaining_cooldown = max(0, CONVERSION_COOLDOWN - (time.time() - last_conversion))
+    
+    if remaining_cooldown > 0 and not user_data["first_conversion"]:
+        cooldown_str = str(timedelta(seconds=int(remaining_cooldown)))
+        await message.reply_text(
+            f"⏳ You can convert again in {cooldown_str}. "
+            "Please wait before converting more currencies."
+        )
+        return
+    
+    # Show currency selection
+    await message.reply_text(
+        "💱 **Currency Conversion**\n\n"
+        "Please select the currency you want to convert FROM:",
+        reply_markup=create_conversion_keyboard()
+    )
+
+@app.on_message(filters.command("rconvert") & filters.user(OWNER_ID))
+async def reset_cooldown(client: Client, message: Message):
+    """Owner command to reset cooldown for a user"""
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        await message.reply_text("⚠️ Please reply to a user's message to reset their cooldown.")
+        return
+    
+    target_user = message.reply_to_message.from_user
+    
+    await user_collection.update_one(
+        {'id': target_user.id},
+        {'$unset': {'conversion_data.last_conversion': ''}}
+    )
+    
+    await message.reply_text(f"✅ Cooldown reset for {target_user.first_name}!")
+
+@app.on_callback_query(filters.regex(r"^convert_select_(.+)$"))
+async def select_source_currency(client, callback_query):
+    user_id = callback_query.from_user.id
+    from_currency = callback_query.matches[0].group(1)
+    
+    if from_currency not in CURRENCIES:
+        await callback_query.answer("Invalid currency selection!")
+        return
+    
+    user_data = await get_user_conversion_data(user_id)
+    if not user_data or user_data["balances"][from_currency] <= 0:
+        await callback_query.answer(f"You don't have any {CURRENCIES[from_currency]['name']} to convert!")
+        return
+    
+    # Create target currency buttons (excluding source currency)
+    buttons = []
+    for currency in CURRENCIES:
+        if currency != from_currency:
+            buttons.append(
+                InlineKeyboardButton(
+                    text=f"{CURRENCIES[currency]['emoji']} {CURRENCIES[currency]['name']}",
+                    callback_data=f"convert_target_{from_currency}_{currency}"
+                )
+            )
+    
+    keyboard = InlineKeyboardMarkup([buttons])
+    
+    await callback_query.edit_message_text(
+        f"🔹 Converting from {CURRENCIES[from_currency]['name']}\n\n"
+        "Select the currency you want to convert TO:",
+        reply_markup=keyboard
+    )
+    await callback_query.answer()
+
+@app.on_callback_query(filters.regex(r"^convert_target_(.+)_(.+)$"))
+async def select_target_currency(client, callback_query):
+    user_id = callback_query.from_user.id
+    from_currency = callback_query.matches[0].group(1)
+    to_currency = callback_query.matches[0].group(2)
+    
+    if from_currency not in CURRENCIES or to_currency not in CURRENCIES:
+        await callback_query.answer("Invalid currency selection!")
+        return
+    
+    user_data = await get_user_conversion_data(user_id)
+    if not user_data or user_data["balances"][from_currency] <= 0:
+        await callback_query.answer(f"You don't have any {CURRENCIES[from_currency]['name']} to convert!")
+        return
+    
+    exchange_rate = CURRENCIES[from_currency]["exchange_rates"].get(to_currency, 0)
+    if not exchange_rate:
+        await callback_query.answer("Conversion between these currencies is not supported!")
+        return
+    
+    await callback_query.edit_message_text(
+        f"💱 **Currency Conversion**\n\n"
+        f"From: {CURRENCIES[from_currency]['emoji']} {CURRENCIES[from_currency]['name']}\n"
+        f"To: {CURRENCIES[to_currency]['emoji']} {CURRENCIES[to_currency]['name']}\n"
+        f"Exchange Rate: 1{CURRENCIES[from_currency]['symbol']} = {exchange_rate}{CURRENCIES[to_currency]['symbol']}\n\n"
+        f"Your balance: {format_currency(user_data['balances'][from_currency], from_currency)}\n\n"
+        "Please reply with the amount you want to convert (or 'max' to convert all):",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel", callback_data="convert_cancel")]
+        ])
+    )
+    
+    # Store conversion context in user collection
+    await user_collection.update_one(
+        {'id': user_id},
+        {'$set': {
+            'conversion_context': {
+                'from_currency': from_currency,
+                'to_currency': to_currency,
+                'exchange_rate': exchange_rate,
+                'message_id': callback_query.message.id
+            }
+        }},
+        upsert=True
+    )
+    
+    await callback_query.answer()
+
+def is_conversion_reply(message: Message) -> bool:
+    """Check if the message is a reply to a conversion request"""
+    if not message.reply_to_message:
+        return False
+    
+    # Check if the replied message is from the bot and contains conversion info
+    if (message.reply_to_message.from_user and 
+        message.reply_to_message.from_user.is_self and
+        "Currency Conversion" in (message.reply_to_message.text or "")):
+        return True
+    
+    return False
+
+@app.on_message(filters.text & filters.reply & filters.private)
+async def process_conversion_amount(client: Client, message: Message):
+    """Process the amount to convert after user replies"""
+    if not is_conversion_reply(message):
+        return
+    
+    user_id = message.from_user.id
+    
+    # Get conversion context
+    user_data = await user_collection.find_one(
+        {'id': user_id},
+        projection={'conversion_context': 1, 'gold': 1, 'rubies': 1, 'tokens': 1}
+    )
+    
+    if not user_data or 'conversion_context' not in user_data:
+        await message.reply_text("⚠️ Conversion context not found. Please start a new conversion.")
+        return
+    
+    context = user_data['conversion_context']
+    from_currency = context['from_currency']
+    to_currency = context['to_currency']
+    exchange_rate = context['exchange_rate']
+    
+    # Get user's current balance
+    current_balance = float(user_data.get(from_currency, 0))
+    
+    # Parse amount
+    try:
+        if message.text.lower() == 'max':
+            amount = current_balance
+        else:
+            amount = float(message.text.replace(',', ''))
+            
+            if amount <= 0:
+                await message.reply_text("⚠️ Amount must be positive!")
+                return
+                
+            if amount > current_balance:
+                await message.reply_text(f"⚠️ You don't have enough {CURRENCIES[from_currency]['name']}!")
+                return
+    except ValueError:
+        await message.reply_text("⚠️ Invalid amount! Please enter a number or 'max'.")
+        return
+    
+    # Check if first conversion
+    first_conversion = await user_collection.find_one(
+        {'id': user_id, 'first_conversion': True}
+    )
+    
+    # Calculate taxes
+    total_tax, currency_tax, bot_tax = calculate_taxes(
+        amount, from_currency, to_currency, first_conversion
+    )
+    net_amount = amount - total_tax
+    
+    # Calculate converted amount
+    converted_amount = net_amount * exchange_rate
+    
+    # Update balances
+    await update_user_balance(user_id, from_currency, -amount)
+    await update_user_balance(user_id, to_currency, converted_amount)
+    
+    # Log conversion
+    await log_conversion(user_id, from_currency, to_currency, amount)
+    
+    # Prepare response message
+    tax_message = ""
+    if not first_conversion:
+        tax_message = (
+            f"\n\n💰 **Tax Details:**\n"
+            f"- {CURRENCIES[from_currency]['name']} Tax: {format_currency(currency_tax, from_currency)} ({CURRENCIES[from_currency]['tax_rate']*100}%)\n"
+            f"- Bot Tax: {format_currency(bot_tax, from_currency)} ({BOT_TAX_RATE*100}%)\n"
+            f"- Net Converted: {format_currency(net_amount, from_currency)}"
+        )
+    else:
+        tax_message = "\n\n🎉 **First conversion bonus: No taxes applied!**"
+    
+    response = (
+        f"✅ **Conversion Successful!**\n\n"
+        f"▸ Converted: {format_currency(amount, from_currency)}\n"
+        f"▸ Received: {format_currency(converted_amount, to_currency)}\n"
+        f"▸ Exchange Rate: 1{CURRENCIES[from_currency]['symbol']} = {exchange_rate}{CURRENCIES[to_currency]['symbol']}"
+        f"{tax_message}"
+    )
+    
+    # Edit original message
+    try:
+        await client.edit_message_text(
+            chat_id=message.chat.id,
+            message_id=context['message_id'],
+            text=response
+        )
+    except:
+        await message.reply_text(response)
+    
+    # Clear conversion context
+    await user_collection.update_one(
+        {'id': user_id},
+        {'$unset': {'conversion_context': ''}}
+    )
+
+@app.on_callback_query(filters.regex(r"^convert_cancel$"))
+async def cancel_conversion(client, callback_query):
+    user_id = callback_query.from_user.id
+    await user_collection.update_one(
+        {'id': user_id},
+        {'$unset': {'conversion_context': ''}}
+    )
+    
+    await callback_query.edit_message_text("❌ Currency conversion cancelled.")
+    await callback_query.answer()
+
+@app.on_message(filters.command(["rates", "exchange_rates"]))
+async def show_exchange_rates(client: Client, message: Message):
+    """Show all available exchange rates"""
+    rates_text = "💱 **Current Exchange Rates**\n\n"
+    
+    for from_curr, from_data in CURRENCIES.items():
+        rates_text += f"🔹 **{from_data['emoji']} {from_data['name']} ({from_data['symbol']})**\n"
+        
+        for to_curr, rate in from_data["exchange_rates"].items():
+            to_data = CURRENCIES[to_curr]
+            rates_text += (
+                f"▸ {to_data['emoji']} {to_data['name']}: "
+                f"1{from_data['symbol']} = {rate}{to_data['symbol']}\n"
+            )
+        
+        rates_text += "\n"
+    
+    rates_text += (
+        f"ℹ️ **Tax Information:**\n"
+        f"- Currency Tax: Varies by currency (see /taxinfo)\n"
+        f"- Bot Tax: {BOT_TAX_RATE*100}% on all conversions after first free conversion\n"
+        f"- Cooldown: {CONVERSION_COOLDOWN//3600} hours between conversions"
+    )
+    
+    await message.reply_text(rates_text)
+
+@app.on_message(filters.command("taxinfo"))
+async def show_tax_info(client: Client, message: Message):
+    """Show tax information for all currencies"""
+    tax_text = "💰 **Currency Tax Rates**\n\n"
+    
+    for curr, data in CURRENCIES.items():
+        tax_text += (
+            f"{data['emoji']} **{data['name']}**: {data['tax_rate']*100}% tax "
+            f"when converting from this currency\n"
+        )
+    
+    tax_text += (
+        f"\n📌 **Additional Information:**\n"
+        f"- First conversion is always tax-free\n"
+        f"- Bot takes additional {BOT_TAX_RATE*100}% fee after first conversion\n"
+        f"- Total tax = Currency Tax + Bot Tax"
+    )
+    
+    await message.reply_text(tax_text)

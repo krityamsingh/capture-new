@@ -1,0 +1,177 @@
+import random
+from pyrogram import Client, filters
+from pyrogram.errors import UserNotParticipant
+from pyrogram.types import InlineKeyboardButton as IKB, InlineKeyboardMarkup as IKM, CallbackQuery
+from pyrogram.enums import ParseMode
+from datetime import datetime
+from . import user_collection, app, collection
+from .block import block_dec, block_cbq
+
+ags = {}
+daily_purchases = {}
+pending_purchases = {}  # New dictionary to track pending purchases
+
+SUPPORT_GROUP = "Phoenix_Reen"
+SUPPORT_CHANNEL = "Capture_Update"
+
+def get_join_buttons():
+    return IKM([
+        [IKB("🥂 ᴊᴏɪɴ ꜱᴜᴘᴘᴏʀᴛ ɢʀᴏᴜᴘ", url=f"https://t.me/{SUPPORT_GROUP}")],
+        [IKB("🧃 ᴊᴏɪɴ ᴜᴘᴅᴀᴛᴇ ᴄʜᴀɴɴᴇʟ", url=f"https://t.me/{SUPPORT_CHANNEL}")]
+    ])
+
+async def send_media_message(message, character, price):
+    caption = (
+        f"<b>✨ ᴀʀᴀᴀ~ ʜᴇʀᴇ'ꜱ ᴀ ᴋᴀᴡᴀɪɪ ᴄʜᴀʀᴀᴄᴛᴇʀ ꜰᴏʀ ʏᴏᴜ!</b>\n\n"
+        f"<b>🧃 ɴᴀᴍᴇ:</b> {character['name']}\n"
+        f"<b>❄️ ɪᴅ:</b> {character['id']}\n"
+        f"<b>🥂 ʀᴀʀɪᴛʏ:</b> {character['rarity']}\n"
+        f"<b>☘️ ᴘʀɪᴄᴇ:</b> {price:,} ɢᴏʟᴅ\n"
+    )
+
+    keyboard = [
+        [IKB("🛍️ ʙᴜʏ ɴᴏᴡ", callback_data=f"bg:{character['id']}:{price}:{message.from_user.id}"),
+         IKB("🙅 ᴄᴀɴᴄᴇʟ", callback_data=f"cg:{character['id']}:{message.from_user.id}")]
+    ]
+
+    if character['rarity'] == "🧬 Animation":
+        return await message.reply_video(
+            video=character['video_url'],
+            caption=caption,
+            reply_markup=IKM(keyboard),
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        return await message.reply_photo(
+            photo=character['img_url'],
+            caption=caption,
+            reply_markup=IKM(keyboard),
+            parse_mode=ParseMode.HTML
+        )
+
+@app.on_message(filters.command("gbuy"))
+@block_dec
+async def gbuy(client, message):
+    user = message.from_user
+    user_id = user.id
+
+    if not message.chat.username or message.chat.username != SUPPORT_GROUP:
+        return await message.reply_text(
+            f"<b>🧃 {user.first_name}, ᴛʜɪꜱ ᴄᴏᴍᴍᴀɴᴅ ᴏɴʟʏ ᴡᴏʀᴋꜱ ɪɴ ᴏᴜʀ ꜱᴜᴘᴘᴏʀᴛ ɢʀᴏᴜᴘ~</b>\n"
+            f"<i>ᴀʀᴀᴀ... ᴘʟᴇᴀꜱᴇ ᴊᴏɪɴ ғɪʀꜱᴛ!</i>",
+            reply_markup=get_join_buttons(),
+            parse_mode=ParseMode.HTML
+        )
+
+    try:
+        await client.get_chat_member(SUPPORT_CHANNEL, user_id)
+    except UserNotParticipant:
+        return await message.reply_text(
+            f"<b>🧋 {user.first_name}, ʏᴏᴜ ᴍᴜꜱᴛ ᴊᴏɪɴ ᴏᴜʀ ᴜᴘᴅᴀᴛᴇ ᴄʜᴀɴɴᴇʟ ꜰɪʀꜱᴛ~</b>\n\n"
+            f"<i>ᴊᴏɪɴ ᴀɴᴅ ᴛʀʏ ᴀɢᴀɪɴ~ ᴋᴀᴡᴀɪɪ!</i>",
+            reply_markup=get_join_buttons(),
+            parse_mode=ParseMode.HTML
+        )
+
+    args = message.command[1:]
+    today = datetime.now().date()
+
+    # Check daily limit including pending purchases
+    current_pending = len([k for k, v in pending_purchases.items() if v[0] == user_id and v[1] == today])
+    if user_id in daily_purchases:
+        last_date, count = daily_purchases[user_id]
+        if today == last_date and (count + current_pending) >= 3:
+            return await message.reply_text(
+                "<b>😼 ʏᴏᴜ'ᴠᴇ ʀᴇᴀᴄʜᴇᴅ ʏᴏᴜʀ ᴅᴀɪʟʏ ʟɪᴍɪᴛ ᴏꜰ 3 ᴘᴜʀᴄʜᴀꜱᴇꜱ~</b>\n<i>ᴋᴏᴛᴏᴡᴀʀɪ!</i>",
+                parse_mode=ParseMode.HTML
+            )
+
+    if not args:
+        return await message.reply_text(
+            "<b>🦢 ᴏɴᴇᴇ-ᴄʜᴀɴ~ ᴘʟᴇᴀꜱᴇ ɢɪᴠᴇ ᴀ ᴄʜᴀʀᴀᴄᴛᴇʀ ɪᴅ!</b>\n\n<b>ᴜꜱᴀɢᴇ:</b> <code>/gbuy &lt;id&gt;</code>",
+            parse_mode=ParseMode.HTML
+        )
+
+    character = await collection.find_one({'id': args[0]})
+    if not character:
+        return await message.reply_text("💢 <b>ᴄʜᴀʀᴀᴄᴛᴇʀ ɴᴏᴛ ꜰᴏᴜɴᴅ~</b> ʙᴀᴋᴀ!", parse_mode=ParseMode.HTML)
+
+    try:
+        char_id = int(character['id'])
+        if char_id > 400:
+            return await message.reply_text("💢 <b>ᴛʜɪꜱ ᴄʜᴀʀᴀᴄᴛᴇʀ ɪᴅ ɪꜱ ᴛᴏᴏ ʜɪɢʜ~</b> ᴏɴʟʏ ɪᴅꜱ ᴜᴘ ᴛᴏ 400 ᴀʀᴇ ᴀʟʟᴏᴡᴇᴅ!", parse_mode=ParseMode.HTML)
+    except (ValueError, TypeError):
+        return await message.reply_text("💢 <b>ɪɴᴠᴀʟɪᴅ ᴄʜᴀʀᴀᴄᴛᴇʀ ɪᴅ~</b> ʙᴀᴋᴀ!", parse_mode=ParseMode.HTML)
+
+    allowed_rarities = ["🧬 Animation", "🧿 Galaxia", "⚡ Eternal", "🎐 Celestial"]
+    if character.get('rarity') not in allowed_rarities:
+        return await message.reply_text("👊 <b>ᴛʜɪꜱ ᴏɴᴇ ɪꜱ ɴᴏᴛ ꜰᴏʀ ꜱᴀʟᴇ~</b> ᴀʟʟᴏᴡᴇᴅ ʀᴀʀɪᴛʏ ᴏɴʟʏ ᴀɴɪᴍᴀᴛɪᴏɴ , ɢᴀʟᴀxɪᴀ , ᴇᴛᴇʀɴᴀʟ , ᴄᴇʟᴇsᴛɪᴀʟ ", parse_mode=ParseMode.HTML)
+
+    price = random.randint(1000000, 2000000)
+    msg = await send_media_message(message, character, price)
+    ags[msg.message_id] = user_id
+    pending_purchases[msg.message_id] = (user_id, today)  # Track pending purchase
+
+@app.on_callback_query(filters.regex(r"^(bg|cg):"))
+@block_cbq
+async def handle_gbuy_callback(client, query: CallbackQuery):
+    user_id = query.from_user.id
+    data = query.data.split(":")
+    action, character_id = data[0], data[1]
+    current_user_id = int(data[2 if action == "cg" else 3])
+
+    if user_id != current_user_id:
+        return await query.answer("🚫 ɴᴏᴛ ʏᴏᴜʀ ʀᴇQᴜᴇꜱᴛ~ ꜱᴛᴏᴘ ʙᴇɪɴɢ ᴀ ʙᴀᴋᴀ!", show_alert=True)
+
+    if action == "bg":
+        price = int(data[2])
+        user_data = await user_collection.find_one({'id': user_id})
+
+        if user_data['gold'] < price:
+            return await query.answer("❌ ɪɴꜱᴜꜰꜰɪᴄɪᴇɴᴛ ɢᴏʟᴅ~", show_alert=True)
+
+        character = await collection.find_one({'id': character_id})
+        
+        try:
+            char_id = int(character['id'])
+            if char_id > 2500:
+                return await query.answer("🚫 ᴛʜɪꜱ ᴄʜᴀʀᴀᴄᴛᴇʀ ɪꜱ ɴᴏ ʟᴏɴɢᴇʀ ᴀᴠᴀɪʟᴀʙʟᴇ ꜰᴏʀ ᴘᴜʀᴄʜᴀꜱᴇ!", show_alert=True)
+        except (ValueError, TypeError):
+            return await query.answer("🚫 ɪɴᴠᴀʟɪᴅ ᴄʜᴀʀᴀᴄᴛᴇʀ!", show_alert=True)
+
+        allowed_rarities = ["🧬 Animation", "🧿 Galaxia", "⚡ Eternal", "🎐 Celestial"]
+        if character.get('rarity') not in allowed_rarities:
+            return await query.answer("🚫 ᴛʜɪꜱ ᴄʜᴀʀᴀᴄᴛᴇʀ ɪꜱ ɴᴏᴛ ꜰᴏʀ ꜱᴀʟᴇ!", show_alert=True)
+
+        today = datetime.now().date()
+        
+        # Check daily limit again right before purchase
+        if user_id in daily_purchases:
+            last_date, count = daily_purchases[user_id]
+            if today == last_date and count >= 3:
+                pending_purchases.pop(query.message.message_id, None)
+                return await query.answer("🚫 ʏᴏᴜ'ᴠᴇ ʀᴇᴀᴄʜᴇᴅ ʏᴏᴜʀ ᴅᴀɪʟʏ ʟɪᴍɪᴛ!", show_alert=True)
+
+        await user_collection.update_one(
+            {'id': user_id},
+            {'$inc': {'gold': -price}, '$push': {'characters': character}}
+        )
+
+        # Update daily purchases count
+        if user_id in daily_purchases:
+            last_date, count = daily_purchases[user_id]
+            daily_purchases[user_id] = (today, count + 1 if today == last_date else 1)
+        else:
+            daily_purchases[user_id] = (today, 1)
+
+        remaining = max(0, 3 - daily_purchases[user_id][1])
+        await query.message.edit_caption(
+            caption=f"<b>🍜 {character['name']}</b> ᴘᴜʀᴄʜᴀꜱᴇᴅ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ~\n\n<b>ʀᴇᴍᴀɪɴɪɴɢ ᴛᴏᴅᴀʏ:</b> <code>{remaining}</code>",
+            parse_mode=ParseMode.HTML
+        )
+    elif action == "cg":
+        await query.message.edit_caption("❌ <b>ᴘᴜʀᴄʜᴀꜱᴇ ᴄᴀɴᴄᴇʟʟᴇᴅ~</b> ᴀʀᴀ ᴀʀᴀ...", parse_mode=ParseMode.HTML)
+
+    ags.pop(query.message.message_id, None)
+    pending_purchases.pop(query.message.message_id, None)  # Remove from pending purchases
+    await query.answer()

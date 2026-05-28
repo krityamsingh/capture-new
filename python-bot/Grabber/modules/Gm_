@@ -1,0 +1,75 @@
+import random
+from pyrogram import Client, filters
+from pyrogram.types import Message
+from . import Grabberu as app
+
+# Dictionary of greeting keywords and corresponding GIFs
+GREETING_DATA = {
+    "morning": {
+        "keywords": ["good morning", "gm", "morning", "gmorning", "gud morning", "suprabhat"],
+        "gifs": [
+            "https://media.giphy.com/media/3ohs7JG6cq7EWes1fy/giphy.gif",
+            "https://media.giphy.com/media/XA8J1Q1H7KZNK/giphy.gif",
+            "https://media.giphy.com/media/3o7abKhOpu0NwenH3O/giphy.gif"
+        ],
+        "messages": [
+            f"🌞 **Good Morning, {{mention}}!**\n\nWishing you a day filled with sunshine! ☀️",
+            f"🌅 **Rise and shine, {{mention}}!**\n\nMake today amazing! 🌄",
+            f"🌸 **Suprabhat, {{mention}}!**\n\nNew day, new opportunities! 🌺"
+        ]
+    },
+    "night": {
+        "keywords": ["good night", "gn", "night", "gnight", "gud night", "shubh ratri"],
+        "gifs": [
+            "https://media.giphy.com/media/l0HU7JIWm4j5QCRiE/giphy.gif",
+            "https://media.giphy.com/media/3o7TKsQ8UQ3XhQXDBe/giphy.gif",
+            "https://media.giphy.com/media/26BRzozg4TCBXv6QU/giphy.gif"
+        ],
+        "messages": [
+            f"🌙 **Good Night, {{mention}}!**\n\nSweet dreams! 🌠💤",
+            f"🌃 **Shubh Ratri, {{mention}}!**\n\nRest well! 🌌",
+            f"✨ **Sleep tight, {{mention}}!**\n\nTomorrow will be better! 🌜"
+        ]
+    },
+    "evening": {
+        "keywords": ["good evening", "ge", "evening", "gev", "gud evening", "shubh sandhya"],
+        "gifs": [
+            "https://media.giphy.com/media/3o6Zt9F9H3WhEBuQ7K/giphy.gif",
+            "https://media.giphy.com/media/3o7TKsQ8UQ3XhQXDBe/giphy.gif",
+            "https://media.giphy.com/media/3o7TKz2eMXxVL6bZny/giphy.gif"
+        ],
+        "messages": [
+            f"🌆 **Good Evening, {{mention}}!**\n\nHope you had a great day! 🌇",
+            f"🌄 **Shubh Sandhya, {{mention}}!**\n\nRelax and enjoy! 🌅",
+            f"🌉 **Lovely Evening, {{mention}}!**\n\nTime to unwind! 🌃"
+        ]
+    }
+}
+
+@app.on_message(filters.text & ~filters.command())
+async def auto_greeting(client, message: Message):
+    user = message.from_user
+    text = message.text.lower().strip()
+    
+    # Check which greeting matches
+    greeting_type = None
+    for greet_type, data in GREETING_DATA.items():
+        if any(keyword in text for keyword in data["keywords"]):
+            greeting_type = greet_type
+            break
+    
+    if not greeting_type:
+        return
+    
+    # Get random GIF and message
+    gif_url = random.choice(GREETING_DATA[greeting_type]["gifs"])
+    greeting_text = random.choice(GREETING_DATA[greeting_type]["messages"]).format(mention=user.mention)
+    
+    # Send the greeting
+    try:
+        await message.reply_animation(
+            animation=gif_url,
+            caption=greeting_text
+        )
+    except Exception:
+        await message.reply_text(greeting_text)

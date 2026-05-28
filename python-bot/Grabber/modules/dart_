@@ -1,0 +1,164 @@
+from pyrogram import filters, types as t
+import random
+import time
+import asyncio
+from pyrogram import Client
+from Grabber import user_collection
+from . import add, deduct, show, app
+from .block import block_dec, temp_block
+
+# Constants
+COOLDOWN_DURATION = 25  # Cooldown duration in seconds
+MIN_BET_PERCENTAGE = 0.10  # Minimum bet is 10% of balance
+WIN_MULTIPLIERS = {
+    1: 0.02,   # Missed completely - lose 98%
+    2: 0.02,   # Missed completely - lose 98%
+    3: 0.02,   # Missed completely - lose 98%
+    4: 0.02,   # Missed completely - lose 98%
+    5: 1.0,    # Hit outer ring - get full amount back
+    6: 1.5     # Hit bullseye - win 1.5x
+}
+
+last_usage = {}
+
+@app.on_message(filters.command(["dart"]))
+@block_dec
+async def dart_game(client: Client, message: t.Message):
+    user_id = message.from_user.id
+    current_time = time.time()
+    
+    # Check temp block
+    if user_id in temp_block and current_time < temp_block[user_id]:
+        return
+    
+    # User check
+    user = await user_collection.find_one({'id': user_id})
+    if not user:
+        await message.reply_text(
+            "🎯 **Dart Master** 🎯\n\n"
+            "You need to grab some slaves first to play Dart Challenge!\n"
+            "Use /grab to get started and earn your first ₩!"
+        )
+        return
+    
+    # Cooldown check
+    if user_id in last_usage:
+        elapsed = current_time - last_usage[user_id]
+        if elapsed < COOLDOWN_DURATION:
+            remaining = int(COOLDOWN_DURATION - elapsed)
+            await message.reply_text(
+                f"⏳ **Cooldown Active**\n"
+                f"Take a breath! You can throw again in {remaining}s\n\n"
+                f"`Pro Tip:` Use this time to plan your next strategy!"
+            )
+            return
+    
+    # Command validation
+    try:
+        _, amount_str = message.text.split()
+        amount = int(amount_str)
+        if amount <= 0: raise ValueError
+    except:
+        await message.reply_text(
+            "🎯 **Invalid Command**\n\n"
+            "Usage: `/dart <amount>`\n"
+            "Example: `/dart 5000`\n\n"
+            "`Note:` Amount must be a positive number!"
+        )
+        return
+    
+    # Balance check
+    balance = await show(user_id)
+    min_bet = max(1000, int(balance * MIN_BET_PERCENTAGE))  # Minimum 1000 or 10% of balance
+    
+    if amount < min_bet:
+        await message.reply_text(
+            f"🎯 **Minimum Bet Required**\n\n"
+            f"Your balance: ₩`{balance:,}` \n"
+            f"Minimum bet: ₩`{min_bet:,}` (10% of balance)\n\n"
+            f"`Tip:` Bet wisely to maximize your wins!"
+        )
+        return
+    
+    if amount > balance:
+        await message.reply_text(
+            "🎯 **Insufficient Funds**\n\n"
+            f"You only have ₩`{balance:,}` !\n"
+            "Use /grab to earn more or bet lower amounts."
+        )
+        return
+    
+    # Deduct amount immediately
+    await deduct(user_id, amount)
+    
+    # Send dart and get result
+    try:
+        dart_msg = await client.send_dice(
+            chat_id=message.chat.id,
+            emoji="🎯",
+            disable_notification=True
+        )
+        
+        # Process result after animation completes
+        await asyncio.sleep(2.5)
+        result = dart_msg.dice.value
+        
+        # Calculate outcome based on new rules
+        multiplier = WIN_MULTIPLIERS.get(result, 0)
+        win_amount = int(amount * multiplier)
+        
+        if result == 6:  # Bullseye
+            await add(user_id, win_amount)
+            await add_xp(user_id, 5)
+            responses = [
+                f"🎯 **BULLSEYE!** 🎯\n\nPerfect shot! Won ₩ `{win_amount:,}` (1.5x)\n\n`Skill Level:` Legendary",
+                f"🎯 **PRECISION MASTER!** 🎯\n\nDirect hit! Earned ₩ `{win_amount:,}` \n\n`XP Bonus:` +5",
+                f"🎯 **CHAMPION THROW!** 🎯\n\nUnstoppable! +₩ `{win_amount:,}` \n\n`Pro Tip:` You're on fire!"
+            ]
+        elif result == 5:  # Outer ring
+            await add(user_id, win_amount)
+            await add_xp(user_id, 2)
+            responses = [
+                f"🎯 **Good Shot!** 🎯\n\nHit the outer ring! Got your ₩ `{amount:,}` back\n\n`Tip:` Aim for the center next time!",
+                f"🎯 **On Target!** 🎯\n\nClose one! Returned ₩ `{amount:,}` \n\n`XP Bonus:` +2",
+                f"🎯 **Safe Play!** 🎯\n\nYou broke even this round\n\n`Strategy:` Try for bigger wins!"
+            ]
+        else:  # Complete miss
+            lost_amount = amount - win_amount
+            responses = [
+                f"🎯 **Missed!** 🎯\n\nThe dart went wide! Lost ₩ `{lost_amount:,}` (only got 2% back)\n\n`Recovery:` Practice your aim!",
+                f"🎯 **Off Target!** 🎯\n\nBetter luck next time! -₩ `{lost_amount:,}` \n\n`Tip:` Watch your throwing technique",
+                f"🎯 **Unlucky Throw!** 🎯\n\nOnly got ₩ `{win_amount:,}` back from ₩ `{amount:,}` \n\n`XP Loss:` -1"
+            ]
+            await deduct_xp(user_id, 1)
+        
+        await dart_msg.reply_text(random.choice(responses))
+        
+    except Exception as e:
+        print(f"Dart Error: {e}")
+        await message.reply_text(
+            "🎯 **System Error**\n\n"
+            "The dart board malfunctioned! Please try again later."
+        )
+        # Refund if error occurred
+        await add(user_id, amount)
+    
+    # Update cooldown
+    last_usage[user_id] = time.time()
+
+async def add_xp(user_id, amount):
+    await user_collection.update_one(
+        {'id': user_id},
+        {'$inc': {'xp': amount}},
+        upsert=True
+    )
+
+async def deduct_xp(user_id, amount):
+    current_user = await user_collection.find_one({'id': user_id})
+    current_xp = current_user.get('xp', 0)
+    deduction = min(amount, current_xp)  # Don't go below 0
+    await user_collection.update_one(
+        {'id': user_id},
+        {'$inc': {'xp': -deduction}},
+        upsert=True
+    )

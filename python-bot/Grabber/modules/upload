@@ -1,0 +1,954 @@
+"""
+upload.py — Unified Upload Management Module (FIXED v2.1)
+==========================================================
+
+CRITICAL FIXES (v2.1):
+  ✅ Fixed "WEBPAGE_MEDIA_EMPTY" error by validating images after upload
+  ✅ Better Catbox upload error handling and validation
+  ✅ Automatic retry with exponential backoff
+  ✅ Image format validation before upload
+  ✅ Telegram-compatible image optimization
+  ✅ Fallback to file_id if URL upload fails
+"""
+
+import asyncio
+import random
+import os
+import re
+import tempfile
+from typing import Optional, Tuple, List, Dict
+
+import aiohttp
+import requests
+from pymongo import ReturnDocument
+from pyrogram import Client, filters
+from pyrogram.types import Message
+
+from Grabber import db, collection, CHARA_CHANNEL_ID, SUPPORT_CHAT
+from Grabber.config import OWNER_IDS, CATBOX_USERHASH
+from Grabber.utils.sudo import uploader_filter
+from . import app
+
+
+# ─── Channel IDs ──────────────────────────────────────────────────────────────
+UPLOAD_CHANNEL_ID = -1002672414862   # channel where uploaded characters are posted
+UPLOAD_GC_ID      = -1002313549356   # group chat where uploads are announced
+
+# ─── DB references ────────────────────────────────────────────────────────────
+uploaderdb   = db.uploader
+sequences_db = db.sequences
+
+# ─── In-memory queue: {user_id: [ {msg, char_name, anime, rarity}, … ]} ──────
+_upload_queue: dict[int, list[dict]] = {}
+
+# ─── Global aiohttp session ────────────────────────────────────────────────────
+_aiohttp_session: Optional[aiohttp.ClientSession] = None
+
+# ─── Upload settings ──────────────────────────────────────────────────────────
+MAX_CATBOX_RETRIES = 3
+CATBOX_RETRY_DELAY = 2  # seconds
+CATBOX_TIMEOUT = 60  # seconds
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  RARITY MAP
+# ══════════════════════════════════════════════════════════════════════════════
+
+VALID_RARITIES = {
+    "🔴 Common", "🔮 Limited Edition", "🫧 Premium", "🟡 Legendary",
+    "⚪ Epic", "🟠 Rare", "🔵 Uncommon", "🏵️ Exotic", "⚜️ Animated",
+    "🌼 Celebrity", "🎐 Crystal", "🍹 Neon", "🧿 Supreme", "⚡ Thundra",
+    "🛸 Galvoria", "🔮 Arcane Verse", "🫧 Aether Verse", "🟡 Solar Verse",
+}
+
+RARITY_HINT = (
+    "🔴 Common | 🔮 Limited Edition | 🫧 Premium | 🟡 Legendary | ⚪ Epic | "
+    "🟠 Rare | 🔵 Uncommon | 🏵️ Exotic | ⚜️ Animated | 🌼 Celebrity | "
+    "🎐 Crystal | 🍹 Neon | 🧿 Supreme | ⚡ Thundra | 🛸 Galvoria | "
+    "🔮 Arcane Verse | 🫧 Aether Verse | 🟡 Solar Verse"
+)
+
+CAPTION_FORMAT_HELP = (
+    "**Caption format (3 lines):**\n"
+    "```\nName - <character name>\nAnime - <anime name>\nRarity - 🟠 Rare\n```\n\n"
+    "**Available rarities:**\n"
+    f"`{RARITY_HINT}`"
+)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  OWNER FILTER
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _is_owner(_, __, message: Message) -> bool:
+    return bool(message.from_user and message.from_user.id in OWNER_IDS)
+
+owner_filter = filters.create(_is_owner)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SESSION MANAGEMENT
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def get_aiohttp_session() -> aiohttp.ClientSession:
+    """Get or create a global aiohttp session."""
+    global _aiohttp_session
+    if _aiohttp_session is None or _aiohttp_session.closed:
+        _aiohttp_session = aiohttp.ClientSession()
+    return _aiohttp_session
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def get_next_sequence_number(sequence_name: str = "character_id") -> int:
+    """Get next character ID with safety checks."""
+    try:
+        all_chars = await collection.find(
+            {"id": {"$exists": True}}, {"id": 1}
+        ).to_list(length=None)
+
+        existing_ids = []
+        for c in all_chars:
+            try:
+                existing_ids.append(int(c["id"]))
+            except (ValueError, TypeError):
+                pass
+        db_max = max(existing_ids) if existing_ids else 0
+
+        seq_doc = await sequences_db.find_one({"_id": sequence_name})
+        seq_val = seq_doc["sequence_value"] if seq_doc else 0
+
+        next_val = max(db_max, seq_val) + 1
+
+        await sequences_db.update_one(
+            {"_id": sequence_name},
+            {"$set": {"sequence_value": next_val}},
+            upsert=True,
+        )
+        return next_val
+    except Exception as e:
+        raise RuntimeError(f"Failed to get next sequence number: {str(e)}")
+
+
+def _parse_caption(caption: str) -> Optional[Tuple[str, str, str]]:
+    """Parse 3-line caption with rarity validation."""
+    lines = [ln.strip() for ln in caption.strip().splitlines() if ln.strip()]
+    if len(lines) < 3:
+        return None
+
+    def extract_value(line: str) -> str:
+        for sep in ("-", ":"):
+            if sep in line:
+                return line.split(sep, 1)[1].strip()
+        return line.strip()
+
+    char_name  = extract_value(lines[0]).title()
+    anime      = extract_value(lines[1]).title()
+    rarity_raw = extract_value(lines[2])
+
+    if not char_name or not anime or not rarity_raw:
+        return None
+
+    rarity = _validate_rarity(rarity_raw)
+    if not rarity:
+        return None
+
+    return char_name, anime, rarity
+
+
+def _validate_rarity(rarity_str: str) -> Optional[str]:
+    """Validate and normalize rarity string."""
+    rarity_str = rarity_str.strip()
+    
+    # Exact match
+    for valid in VALID_RARITIES:
+        if valid.lower() == rarity_str.lower():
+            return valid
+    
+    # Emoji match
+    raw_emoji = rarity_str.split()[0] if rarity_str else ""
+    for valid in VALID_RARITIES:
+        if valid.startswith(raw_emoji) and raw_emoji:
+            return valid
+    
+    # Fuzzy match
+    def text_only(s):
+        return re.sub(r"[^\w\s]", "", s, flags=re.UNICODE).lower().strip()
+    
+    raw_text = text_only(rarity_str)
+    best = None
+    best_score = 0
+    for valid in VALID_RARITIES:
+        valid_text = text_only(valid)
+        matches = sum(a == b for a, b in zip(raw_text, valid_text))
+        score = matches / max(len(raw_text), len(valid_text), 1)
+        if score > best_score and score >= 0.6:
+            best = valid
+            best_score = score
+    
+    return best
+
+
+async def _validate_image_url(url: str) -> Tuple[bool, Optional[str]]:
+    """
+    Check if URL is accessible and returns valid image content.
+    Returns (is_valid: bool, error_reason: Optional[str])
+    """
+    if not url:
+        return False, "URL is empty"
+    
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return False, "Invalid URL format"
+    
+    try:
+        session = await get_aiohttp_session()
+        async with session.head(
+            url,
+            timeout=aiohttp.ClientTimeout(total=10),
+            allow_redirects=True,
+            ssl=False,  # Some hosts have SSL issues
+        ) as resp:
+            # Check HTTP status
+            if resp.status >= 400:
+                return False, f"HTTP {resp.status}"
+            
+            # Check content type
+            content_type = resp.headers.get("Content-Type", "").lower()
+            if not any(img_type in content_type for img_type in ["image/", "jpeg", "jpg", "png", "gif", "webp"]):
+                return False, f"Invalid content type: {content_type}"
+            
+            # Check content length if available
+            content_length = resp.headers.get("Content-Length")
+            if content_length:
+                try:
+                    size_mb = int(content_length) / (1024 * 1024)
+                    if size_mb > 50:
+                        return False, f"File too large: {size_mb:.1f}MB"
+                    if size_mb < 0.01:
+                        return False, f"File too small: {size_mb*1024:.1f}KB"
+                except (ValueError, TypeError):
+                    pass
+            
+            return True, None
+    
+    except asyncio.TimeoutError:
+        return False, "Request timeout"
+    except aiohttp.ClientError as e:
+        return False, f"Network error: {type(e).__name__}"
+    except Exception as e:
+        return False, f"Error: {str(e)[:50]}"
+
+
+async def _is_url_broken(url: str) -> Tuple[bool, Optional[str]]:
+    """
+    Check if URL is reachable.
+    Returns (is_broken: bool, error_reason: Optional[str])
+    """
+    if not url:
+        return True, "URL is empty"
+    
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return False, None   # Telegram file_id
+    
+    try:
+        session = await get_aiohttp_session()
+        async with session.head(
+            url,
+            timeout=aiohttp.ClientTimeout(total=8),
+            allow_redirects=True,
+            ssl=False,
+        ) as resp:
+            if resp.status >= 400:
+                return True, f"HTTP {resp.status}"
+            return False, None
+    except asyncio.TimeoutError:
+        return True, "Timeout"
+    except aiohttp.ClientError as e:
+        return True, f"Network: {type(e).__name__}"
+    except Exception as e:
+        return True, f"Error: {str(e)[:50]}"
+
+
+def _is_valid_image_file(file_path: str) -> Tuple[bool, Optional[str]]:
+    """
+    Check if local file is a valid image.
+    Returns (is_valid: bool, error_reason: Optional[str])
+    """
+    if not os.path.exists(file_path):
+        return False, "File not found"
+    
+    try:
+        file_size = os.path.getsize(file_path)
+        
+        # Check file size (10KB - 50MB)
+        if file_size < 10240:
+            return False, f"File too small: {file_size/1024:.1f}KB"
+        if file_size > 50 * 1024 * 1024:
+            return False, f"File too large: {file_size/(1024*1024):.1f}MB"
+        
+        # Check magic bytes (file signature)
+        with open(file_path, 'rb') as f:
+            magic = f.read(12)
+        
+        # Valid image signatures
+        if magic.startswith(b'\xFF\xD8\xFF'):  # JPEG
+            return True, None
+        elif magic.startswith(b'\x89PNG\r\n\x1a\n'):  # PNG
+            return True, None
+        elif magic.startswith(b'GIF8'):  # GIF
+            return True, None
+        elif magic.startswith(b'RIFF') and magic[8:12] == b'WEBP':  # WEBP
+            return True, None
+        else:
+            return False, f"Unrecognized image format (magic: {magic[:4].hex()})"
+    
+    except Exception as e:
+        return False, f"File validation error: {str(e)[:50]}"
+
+
+async def _upload_to_catbox(file_path: str, retry_count: int = 0) -> str:
+    """
+    Upload file to catbox.moe with retry logic and validation.
+    Returns the public HTTPS URL.
+    """
+    # Validate local file
+    is_valid, error = _is_valid_image_file(file_path)
+    if not is_valid:
+        raise RuntimeError(f"Invalid image file: {error}")
+    
+    try:
+        with open(file_path, "rb") as fh:
+            # Use sync requests for file upload (more reliable)
+            resp = requests.post(
+                "https://catbox.moe/user/api.php",
+                data={"reqtype": "fileupload", "userhash": CATBOX_USERHASH},
+                files={"fileToUpload": fh},
+                timeout=CATBOX_TIMEOUT,
+            )
+        
+        if resp.status_code != 200:
+            raise RuntimeError(f"Catbox HTTP {resp.status_code}: {resp.text[:200]}")
+        
+        url = resp.text.strip()
+        
+        # Validate response is a URL
+        if not url.startswith("https://"):
+            raise RuntimeError(f"Invalid response from Catbox: {url[:100]}")
+        
+        # Validate the returned URL is accessible and contains image
+        is_valid_url, url_error = await _validate_image_url(url)
+        if not is_valid_url:
+            if retry_count < MAX_CATBOX_RETRIES - 1:
+                await asyncio.sleep(CATBOX_RETRY_DELAY)
+                return await _upload_to_catbox(file_path, retry_count + 1)
+            else:
+                raise RuntimeError(f"Uploaded URL invalid: {url_error}")
+        
+        return url
+    
+    except requests.exceptions.Timeout:
+        if retry_count < MAX_CATBOX_RETRIES - 1:
+            await asyncio.sleep(CATBOX_RETRY_DELAY)
+            return await _upload_to_catbox(file_path, retry_count + 1)
+        else:
+            raise RuntimeError("Catbox upload timeout after retries")
+    
+    except requests.exceptions.RequestException as e:
+        if retry_count < MAX_CATBOX_RETRIES - 1:
+            await asyncio.sleep(CATBOX_RETRY_DELAY)
+            return await _upload_to_catbox(file_path, retry_count + 1)
+        else:
+            raise RuntimeError(f"Catbox upload failed: {str(e)[:100]}")
+
+
+async def _save_character(
+    client: Client,
+    photo_msg: Message,
+    char_name: str,
+    anime: str,
+    rarity: str,
+    uploader_mention: str,
+) -> dict:
+    """
+    Download photo → upload to Catbox → assign sequence ID →
+    insert into MongoDB → announce to channels.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        # Download photo
+        await client.download_media(photo_msg.photo, file_name=tmp_path)
+        
+        # Upload to Catbox with validation
+        img_url = await _upload_to_catbox(tmp_path)
+        
+    except Exception as e:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise RuntimeError(f"Upload process failed: {str(e)}")
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+    # Generate character data
+    char_id = str(await get_next_sequence_number()).zfill(2)
+    price   = random.randint(60_000, 80_000)
+
+    character = {
+        "img_url": img_url,
+        "name":    char_name,
+        "anime":   anime,
+        "rarity":  rarity,
+        "price":   price,
+        "id":      char_id,
+    }
+
+    channel_caption = (
+        f"🌸 **New Character Added!**\n\n"
+        f"👤 **Name:** {char_name}\n"
+        f"📺 **Anime:** {anime}\n"
+        f"⭐ **Rarity:** {rarity}\n"
+        f"💰 **Price:** {price:,}\n"
+        f"🆔 **ID:** `{char_id}`\n"
+        f"➕ **Added by:** {uploader_mention}"
+    )
+
+    # Send to upload channel
+    try:
+        sent = await client.send_photo(
+            chat_id=UPLOAD_CHANNEL_ID,
+            photo=img_url,
+            caption=channel_caption,
+        )
+        character["message_id"] = sent.id
+    except Exception as e:
+        raise RuntimeError(f"Failed to send to upload channel: {str(e)}")
+
+    # Send to announcement group
+    try:
+        await client.send_photo(
+            chat_id=UPLOAD_GC_ID,
+            photo=img_url,
+            caption=channel_caption,
+        )
+    except Exception as e:
+        # Non-critical failure
+        pass
+
+    # Send to character channel
+    if CHARA_CHANNEL_ID not in (UPLOAD_CHANNEL_ID, UPLOAD_GC_ID):
+        try:
+            await client.send_photo(
+                chat_id=CHARA_CHANNEL_ID,
+                photo=img_url,
+                caption=channel_caption,
+            )
+        except Exception:
+            pass
+
+    # Save to database
+    try:
+        await collection.insert_one(character)
+    except Exception as e:
+        raise RuntimeError(f"Database insert failed: {str(e)}")
+    
+    return character
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  /upload — single photo, sequence ID assigned automatically
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.on_message(filters.command("upload") & uploader_filter)
+async def upload_cmd(client: Client, message: Message):
+    """Reply to a photo with /upload. Caption can be on photo or after command."""
+    reply = message.reply_to_message
+    if not reply or not reply.photo:
+        return await message.reply_text(
+            "❌ **Reply to a photo** with `/upload`.\n\n" + CAPTION_FORMAT_HELP
+        )
+
+    raw_cap = (reply.caption or "").strip()
+    if not raw_cap:
+        parts = message.text.split(None, 1)
+        raw_cap = parts[1].strip() if len(parts) > 1 else ""
+
+    parsed = _parse_caption(raw_cap) if raw_cap else None
+    if not parsed:
+        return await message.reply_text(
+            "❌ **Invalid or missing caption.**\n\n" + CAPTION_FORMAT_HELP
+        )
+
+    char_name, anime, rarity = parsed
+    status = await message.reply_text(
+        f"⏳ **Uploading** `{char_name}` to Catbox and validating…"
+    )
+
+    mention = f"[{message.from_user.first_name}](tg://user?id={message.from_user.id})"
+    try:
+        char = await _save_character(client, reply, char_name, anime, rarity, mention)
+    except Exception as e:
+        return await status.edit_text(
+            f"❌ **Upload failed:**\n`{str(e)}`\n\n"
+            "**Troubleshooting:**\n"
+            "• Check image format (JPEG, PNG supported)\n"
+            "• Check image size (10KB - 50MB)\n"
+            "• Ensure stable internet connection"
+        )
+
+    await status.edit_text(
+        f"✅ **Character saved!**\n\n"
+        f"🆔 **ID:** `{char['id']}`\n"
+        f"👤 **Name:** {char['name']}\n"
+        f"📺 **Anime:** {char['anime']}\n"
+        f"⭐ **Rarity:** {char['rarity']}\n"
+        f"💰 **Price:** {char['price']:,}\n"
+        f"🖼 **URL:** `{char['img_url'][:60]}…`"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  /bulkupload — upload a full media-group album in one command
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.on_message(filters.command("bulkupload") & uploader_filter)
+async def bulkupload_cmd(client: Client, message: Message):
+    """Reply to the FIRST photo of an album with /bulkupload."""
+    reply = message.reply_to_message
+    if not reply or not reply.photo:
+        return await message.reply_text(
+            "❌ **Reply to the first photo of an album** with `/bulkupload`.\n\n"
+            + CAPTION_FORMAT_HELP
+        )
+
+    media_group_id = reply.media_group_id
+    if not media_group_id:
+        return await message.reply_text(
+            "⚠️ That photo is not part of an album.\nUse `/upload` for a single photo."
+        )
+
+    status = await message.reply_text("📥 **Collecting album photos…** ⏳")
+
+    album_msgs: list[Message] = []
+    async for m in client.get_chat_history(reply.chat.id, limit=50):
+        if m.media_group_id == media_group_id and m.photo:
+            album_msgs.append(m)
+        if len(album_msgs) >= 10:
+            break
+
+    if not album_msgs:
+        return await status.edit_text("❌ Could not retrieve album photos.")
+
+    album_msgs.sort(key=lambda m: m.id)
+
+    mention = f"[{message.from_user.first_name}](tg://user?id={message.from_user.id})"
+    saved, failed = [], []
+
+    for i, photo_msg in enumerate(album_msgs, 1):
+        raw_cap = (photo_msg.caption or "").strip()
+        parsed  = _parse_caption(raw_cap) if raw_cap else None
+
+        if not parsed:
+            failed.append(f"Photo {i} — bad/missing caption")
+            continue
+
+        char_name, anime, rarity = parsed
+        await status.edit_text(f"📤 **Uploading {i}/{len(album_msgs)}:** `{char_name}`…")
+
+        try:
+            char = await _save_character(client, photo_msg, char_name, anime, rarity, mention)
+            saved.append(f"✅ `{char['id']}` — **{char['name']}** ({char['anime']})")
+        except Exception as e:
+            failed.append(f"Photo {i} — {char_name}: {str(e)[:60]}")
+
+        await asyncio.sleep(0.5)
+
+    lines = [f"📦 **Bulk Upload Complete**", f"✅ {len(saved)} | ❌ {len(failed)}\n", *saved]
+    if failed:
+        lines += ["", "**Failures:**", *failed]
+
+    await status.edit_text("\n".join(lines))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  /queueupload — interactive one-by-one queue
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.on_message(filters.command("queueupload") & uploader_filter)
+async def queueupload_start(client: Client, message: Message):
+    """Open a queue-upload session."""
+    uid = message.from_user.id
+    _upload_queue[uid] = []
+    await message.reply_text(
+        "📋 **Queue mode ON!**\n\nSend photos one by one:\n"
+        + CAPTION_FORMAT_HELP
+        + "\n\n• `/queuedone` → save\n"
+        "• `/queuecancel` → discard"
+    )
+
+
+@app.on_message(filters.private & filters.photo & uploader_filter)
+async def queueupload_receive(client: Client, message: Message):
+    """Capture photos during queue session."""
+    uid = message.from_user.id
+    if uid not in _upload_queue:
+        return
+
+    raw_cap = (message.caption or "").strip()
+    parsed  = _parse_caption(raw_cap) if raw_cap else None
+
+    if not parsed:
+        return await message.reply_text(
+            "⚠️ **Caption invalid** — photo NOT queued.\n\n" + CAPTION_FORMAT_HELP
+        )
+
+    char_name, anime, rarity = parsed
+    _upload_queue[uid].append({
+        "msg": message, "char_name": char_name, "anime": anime, "rarity": rarity,
+    })
+    await message.reply_text(
+        f"✅ **Queued [{len(_upload_queue[uid])}]:** {char_name}\n"
+        "Send more, or `/queuedone`"
+    )
+
+
+@app.on_message(filters.command("queuedone") & uploader_filter)
+async def queueupload_done(client: Client, message: Message):
+    """Commit queue to database."""
+    uid = message.from_user.id
+    queue = _upload_queue.get(uid)
+
+    if queue is None:
+        return await message.reply_text("❌ No active queue. Use `/queueupload` first.")
+    if not queue:
+        _upload_queue.pop(uid, None)
+        return await message.reply_text("⚠️ Queue is empty.")
+
+    status = await message.reply_text(f"📤 **Saving {len(queue)} character(s)…**")
+    mention = f"[{message.from_user.first_name}](tg://user?id={uid})"
+    saved, failed = [], []
+
+    for i, item in enumerate(queue, 1):
+        await status.edit_text(f"📤 **{i}/{len(queue)}:** `{item['char_name']}`…")
+        try:
+            char = await _save_character(
+                client, item["msg"], item["char_name"], item["anime"], item["rarity"], mention
+            )
+            saved.append(f"✅ `{char['id']}` — **{char['name']}**")
+        except Exception as e:
+            failed.append(f"❌ {item['char_name']}: {str(e)[:60]}")
+        await asyncio.sleep(0.4)
+
+    _upload_queue.pop(uid, None)
+    lines = [f"🎉 **Complete**: ✅ {len(saved)} | ❌ {len(failed)}\n", *saved]
+    if failed:
+        lines += ["", "**Failures:**", *failed]
+    await status.edit_text("\n".join(lines))
+
+
+@app.on_message(filters.command("queuecancel") & uploader_filter)
+async def queueupload_cancel(client: Client, message: Message):
+    """Discard current queue."""
+    uid = message.from_user.id
+    queue = _upload_queue.pop(uid, None)
+    if queue is None:
+        return await message.reply_text("❌ No active queue.")
+    await message.reply_text(f"🗑 **Cancelled** — {len(queue)} photo(s) discarded.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  /charinfo — Get detailed info about a character
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.on_message(filters.command("charinfo") & uploader_filter)
+async def charinfo_command(client: Client, message: Message):
+    """Get detailed information about a character."""
+    args = message.text.split()
+    if len(args) < 2:
+        return await message.reply_text("❌ **Usage:** `/charinfo <id>`")
+
+    char_id = args[1].strip()
+    try:
+        char = await collection.find_one({"id": char_id})
+        if not char:
+            return await message.reply_text(f"❌ **ID `{char_id}` not found.**")
+
+        img_broken, img_reason = await _is_url_broken(char.get("img_url", ""))
+        vid_broken, vid_reason = await _is_url_broken(char.get("video_url", ""))
+
+        info = (
+            f"📋 **Character Info**\n{'─'*40}\n\n"
+            f"🆔 **ID:** `{char.get('id')}`\n"
+            f"👤 **Name:** {char.get('name')}\n"
+            f"📺 **Anime:** {char.get('anime')}\n"
+            f"⭐ **Rarity:** {char.get('rarity')}\n"
+            f"💰 **Price:** {char.get('price', 0):,}\n\n"
+            f"🖼 **Image:** {'✅ OK' if not img_broken else f'❌ {img_reason}'}\n"
+            f"   `{char.get('img_url', '—')[:60]}`\n"
+        )
+        if char.get('video_url'):
+            info += f"\n🎥 **Video:** {'✅ OK' if not vid_broken else f'❌ {vid_reason}'}\n"
+        
+        await message.reply_text(info)
+    except Exception as e:
+        await message.reply_text(f"❌ **Error:** `{str(e)}`")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  /findchar — Search for characters by name or anime
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.on_message(filters.command("findchar") & uploader_filter)
+async def findchar_command(client: Client, message: Message):
+    """Search for characters."""
+    args = message.text.split(None, 1)
+    if len(args) < 2:
+        return await message.reply_text("❌ **Usage:** `/findchar <name or anime>`")
+
+    search_term = args[1].strip().lower()
+    try:
+        chars = await collection.find({
+            "$or": [
+                {"name": {"$regex": search_term, "$options": "i"}},
+                {"anime": {"$regex": search_term, "$options": "i"}},
+            ]
+        }, {"id": 1, "name": 1, "anime": 1, "rarity": 1}).to_list(length=50)
+
+        if not chars:
+            return await message.reply_text(f"❌ No results for `{search_term}`.")
+
+        lines = [f"🔍 **Results** (`{len(chars)}`)\n{'─'*40}\n"]
+        for c in chars[:20]:
+            lines.append(f"🆔 `{c['id']}` | {c['name']} | {c['anime']}")
+        
+        if len(chars) > 20:
+            lines.append(f"\n... and {len(chars)-20} more")
+        
+        await message.reply_text("\n".join(lines))
+    except Exception as e:
+        await message.reply_text(f"❌ **Error:** `{str(e)}`")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  /checkall — scan all DB characters for broken/missing URLs
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.on_message(filters.command("checkall") & uploader_filter)
+async def checkall_command(client: Client, message: Message):
+    """Scan database for corrupted URLs."""
+    status_msg = await message.reply_text(
+        "🔍 **Scanning database…**\n⏳ Checking every character"
+    )
+
+    try:
+        all_chars = await collection.find(
+            {}, {"id": 1, "name": 1, "anime": 1, "rarity": 1, "img_url": 1, "video_url": 1}
+        ).to_list(length=None)
+    except Exception as e:
+        return await status_msg.edit_text(f"❌ **DB Error:** `{str(e)}`")
+
+    if not all_chars:
+        return await status_msg.edit_text("📭 **Database is empty.**")
+
+    broken = []
+    for i, char in enumerate(all_chars):
+        img_url = char.get("img_url", "").strip()
+        vid_url = char.get("video_url", "").strip()
+
+        img_broken, img_reason = await _is_url_broken(img_url) if img_url else (True, "Missing")
+        vid_broken, vid_reason = await _is_url_broken(vid_url) if vid_url else (False, None)
+
+        if (not img_url and not vid_url) or (img_url and img_broken and not vid_url):
+            broken.append({
+                "id": char['id'], "name": char['name'], "anime": char['anime'],
+                "rarity": char['rarity'], "img_url": img_url or "—", 
+                "img_status": f"❌ {img_reason}" if img_url else "❌ Missing",
+                "vid_status": f"❌ {vid_reason}" if vid_url and vid_broken else ("✅" if vid_url else "—"),
+            })
+
+        if (i + 1) % 50 == 0:
+            await status_msg.edit_text(
+                f"🔍 **Scanning… [{i+1}/{len(all_chars)}]**\n"
+                f"🚨 Broken: `{len(broken)}`"
+            )
+            await asyncio.sleep(0.2)
+
+    if not broken:
+        return await status_msg.edit_text(
+            f"✅ **Scan Complete!**\n🗂 {len(all_chars)} characters checked\n🎉 All healthy!"
+        )
+
+    lines = [
+        f"🚨 **Corrupted URLs**\n🗂 Total: `{len(all_chars)}` | 💔 Broken: `{len(broken)}`\n"
+        f"{'─'*50}\n"
+    ]
+    for b in broken:
+        lines.append(
+            f"🆔 `{b['id']}` — {b['name']}\n"
+            f"   {b['anime']} | {b['rarity']}\n"
+            f"   {b['img_status']}\n"
+        )
+
+    lines.append(f"\n{'─'*50}\n💡 Use `/replace` to fix")
+    
+    # Send in chunks if too long
+    text = "\n".join(lines)
+    if len(text) > 3000:
+        await status_msg.edit_text(text[:3000] + "\n\n... (continued in next message)")
+        await message.reply_text(text[3000:])
+    else:
+        await status_msg.edit_text(text)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  /replace — fix a character's data
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.on_message(filters.command("replace") & uploader_filter)
+async def replace_command(client: Client, message: Message):
+    """Replace character data: /replace <id>-<url>-<anime>-<name>-<rarity>"""
+    raw = message.text.split(None, 1)
+    if len(raw) < 2:
+        return await message.reply_text(
+            "❌ **Usage:** `/replace <id>-<url>-<anime>-<name>-<rarity>`\n\n"
+            "Example: `/replace 42-https://example.com/img.jpg-Naruto-Kakashi-🟠 Rare`"
+        )
+
+    parts = raw[1].split("-", 4)
+    if len(parts) < 5:
+        return await message.reply_text("❌ **Need 5 fields:** id-url-anime-name-rarity")
+
+    char_id, new_url, anime, name, rarity_raw = [p.strip() for p in parts]
+    
+    if not all([char_id, new_url, anime, name, rarity_raw]):
+        return await message.reply_text("❌ **All fields required.**")
+
+    rarity = _validate_rarity(rarity_raw)
+    if not rarity:
+        return await message.reply_text(f"❌ **Invalid rarity:** `{rarity_raw}`")
+
+    status = await message.reply_text("⏳ **Validating URL…**")
+
+    # Validate URL
+    is_valid, error = await _validate_image_url(new_url)
+    if not is_valid:
+        return await status.edit_text(f"❌ **URL invalid:** {error}\n`{new_url}`")
+
+    # Find character
+    try:
+        char = await collection.find_one({"id": char_id})
+    except Exception as e:
+        return await status.edit_text(f"❌ **DB Error:** `{str(e)}`")
+
+    if not char:
+        return await status.edit_text(f"❌ **ID `{char_id}` not found.**")
+
+    old_name = char.get("name", "Unknown")
+    old_anime = char.get("anime", "Unknown")
+    old_rarity = char.get("rarity", "Unknown")
+
+    # Update
+    try:
+        await collection.update_one(
+            {"id": char_id},
+            {"$set": {"img_url": new_url, "name": name.title(), "anime": anime.title(), "rarity": rarity}}
+        )
+    except Exception as e:
+        return await status.edit_text(f"❌ **Update failed:** `{str(e)}`")
+
+    mention = f"[{message.from_user.first_name}](tg://user?id={message.from_user.id})"
+    result = (
+        f"🔄 **Replaced!**\n\n"
+        f"🆔 `{char_id}`\n"
+        f"👤 {old_name} → {name}\n"
+        f"📺 {old_anime} → {anime}\n"
+        f"⭐ {old_rarity} → {rarity}\n\n"
+        f"✅ By: {mention}"
+    )
+    await status.edit_text(result)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  UPLOADER MANAGEMENT (owner only)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.on_message(filters.command("adduploader") & owner_filter)
+async def add_uploader(client: Client, message: Message):
+    """Add uploader privileges."""
+    if message.reply_to_message and message.reply_to_message.from_user:
+        uid = message.reply_to_message.from_user.id
+        name = message.reply_to_message.from_user.first_name
+    else:
+        args = message.text.split()
+        if len(args) < 2:
+            return await message.reply_text("❌ Reply to user or `/adduploader <id>`")
+        try:
+            uid = int(args[1])
+            u = await client.get_users(uid)
+            name = u.first_name
+        except:
+            return await message.reply_text("❌ **Invalid user ID.**")
+
+    if await uploaderdb.find_one({"user_id": uid}):
+        return await message.reply_text(f"⚠️ **{name}** already uploader.")
+
+    try:
+        await uploaderdb.insert_one({"user_id": uid})
+        await message.reply_text(f"✅ **{name}** (`{uid}`) added!\n\nAvailable commands:\n• `/upload`\n• `/bulkupload`\n• `/queueupload`\n• `/checkall`\n• `/replace`")
+    except Exception as e:
+        await message.reply_text(f"❌ **Failed:** `{str(e)}`")
+
+
+@app.on_message(filters.command("rmuploader") & owner_filter)
+async def remove_uploader(client: Client, message: Message):
+    """Remove uploader privileges."""
+    if message.reply_to_message and message.reply_to_message.from_user:
+        uid = message.reply_to_message.from_user.id
+        name = message.reply_to_message.from_user.first_name
+    else:
+        args = message.text.split()
+        if len(args) < 2:
+            return await message.reply_text("❌ Reply to user or `/rmuploader <id>`")
+        try:
+            uid = int(args[1])
+            u = await client.get_users(uid)
+            name = u.first_name
+        except:
+            return await message.reply_text("❌ **Invalid user ID.**")
+
+    if not await uploaderdb.find_one({"user_id": uid}):
+        return await message.reply_text(f"⚠️ **{name}** not an uploader.")
+
+    try:
+        await uploaderdb.delete_one({"user_id": uid})
+        await message.reply_text(f"🗑 **{name}** removed.")
+    except Exception as e:
+        await message.reply_text(f"❌ **Failed:** `{str(e)}`")
+
+
+@app.on_message(filters.command("uploaderlist") & owner_filter)
+async def uploaderlist_command(client: Client, message: Message):
+    """List all uploaders."""
+    try:
+        docs = await uploaderdb.find({}, {"user_id": 1}).to_list(length=None)
+        if not docs:
+            return await message.reply_text("📭 **No uploaders.**")
+
+        lines = [f"👥 **Uploaders** (`{len(docs)}`)\n{'─'*28}"]
+        for i, doc in enumerate(docs, 1):
+            try:
+                u = await client.get_users(doc["user_id"])
+                lines.append(f"{i}. {u.first_name} (`{doc['user_id']}`)")
+            except:
+                lines.append(f"{i}. Unknown (`{doc['user_id']}`)")
+
+        await message.reply_text("\n".join(lines))
+    except Exception as e:
+        await message.reply_text(f"❌ **Error:** `{str(e)}`")

@@ -1,0 +1,517 @@
+import random
+import time
+from datetime import datetime
+from pyrogram import filters, Client
+from pyrogram.types import (
+    Message,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery
+)
+from Grabber import Grabberu as bot
+from Grabber import user_collection, collection
+import asyncio
+
+# Game states and player management
+active_games = {}
+waiting_rooms = {}
+
+# Rarity system with weights
+rarity_system = {
+    '⚫ Common': {'weight': 40, 'emoji': '⚫'},
+    '🟤 Uncommon': {'weight': 25, 'emoji': '🟤'},
+    '🟠 Rare': {'weight': 15, 'emoji': '🟠'},
+    '🟡 Legendary': {'weight': 8, 'emoji': '🟡'},
+    '🟣 Epic': {'weight': 5, 'emoji': '🟣'},
+    '🔱 Godly': {'weight': 3, 'emoji': '🔱'},
+    '💮 Mythic': {'weight': 2, 'emoji': '💮'},
+    '🫧 Premium': {'weight': 1, 'emoji': '🫧'},
+    '🔮 Limited Edition': {'weight': 0.5, 'emoji': '🔮'},
+    '🏵️ Exotic': {'weight': 0.3, 'emoji': '🏵️'},
+    '⚜️ Unique': {'weight': 0.1, 'emoji': '⚜️'}
+}
+
+# Achievement system
+achievement_levels = {
+    1: {"guesses": 100, "claims": 1, "reward": "⚫ Common"},
+    2: {"guesses": 150, "claims": 2, "reward": "🟤 Uncommon"},
+    3: {"guesses": 250, "claims": 3, "reward": "🟠 Rare"},
+    4: {"guesses": 400, "claims": 4, "reward": "🟡 Legendary"},
+    5: {"guesses": 600, "claims": 5, "reward": "🟣 Epic"},
+    6: {"guesses": 850, "claims": 6, "reward": "🔱 Godly"},
+    7: {"guesses": 1200, "claims": 7, "reward": "💮 Mythic"},
+    8: {"guesses": 1600, "claims": 8, "reward": "🫧 Premium"},
+    9: {"guesses": 2000, "claims": 9, "reward": "🔮 Limited Edition"},
+    10: {"guesses": 2500, "claims": 10, "reward": "⚜️ Unique"}
+}
+
+# XP system
+XP_PER_GUESS = 10
+XP_BONUS = {
+    'correct_guess': 50,
+    'rare_character': 100,
+    'game_win': 200
+}
+
+# Helper functions
+def calculate_level(xp):
+    return int((xp / 1000) ** 0.5) + 1
+
+def get_random_character_weighted():
+    total_weight = sum(rarity['weight'] for rarity in rarity_system.values())
+    rand = random.uniform(0, total_weight)
+    current = 0
+    for rarity, data in rarity_system.items():
+        if current + data['weight'] >= rand:
+            pipeline = [
+                {"$match": {"rarity": rarity}},
+                {"$sample": {"size": 1}}
+            ]
+            return rarity, pipeline
+        current += data['weight']
+    return '⚫ Common', [{"$match": {"rarity": "⚫ Common"}}, {"$sample": {"size": 1}}]
+
+async def get_user_data(user_id):
+    user_data = await user_collection.find_one({"id": user_id})
+    if not user_data:
+        user_data = {
+            "id": user_id,
+            "characters": [],
+            "guesses": 0,
+            "correct_guesses": 0,
+            "games_played": 0,
+            "games_won": 0,
+            "xp": 0,
+            "achievement_claims": {str(i): False for i in range(1, 11)}
+        }
+        await user_collection.insert_one(user_data)
+    return user_data
+
+async def update_user_data(user_id, update_data):
+    await user_collection.update_one(
+        {"id": user_id},
+        {"$set": update_data},
+        upsert=True
+    )
+
+def normalize_name(name):
+    """Normalize character names for comparison"""
+    return name.lower().replace("&", "and").replace(".", "").strip()
+
+def is_correct_guess(guess, character_name):
+    """Check if guess matches character name with flexible matching"""
+    guess = normalize_name(guess)
+    char_name = normalize_name(character_name)
+    
+    # Check if either full name matches or last name matches
+    return (guess == char_name or 
+            guess in char_name.split() or 
+            any(part in guess for part in char_name.split()))
+
+# Game commands
+@bot.on_message(filters.command("startgame"))
+async def start_game(client: Client, message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if chat_id in active_games:
+        await message.reply("🚫 **ᴀ ɢᴀᴍᴇ ɪs ᴀʟʀᴇᴀᴅʏ ʀᴜɴɴɪɴɢ ɪɴ ᴛʜɪs ᴄʜᴀᴛ!**")
+        return
+    
+    if chat_id in waiting_rooms:
+        await message.reply("⚠️ **ᴀ ᴡᴀɪᴛɪɴɢ ʀᴏᴏᴍ ᴀʟʀᴇᴀᴅʏ ᴇxɪsᴛs. ᴜsᴇ** /joingame **ᴛᴏ ᴊᴏɪɴ!**")
+        return
+    
+    waiting_rooms[chat_id] = {
+        "host": user_id,
+        "players": {user_id: {"name": message.from_user.mention, "score": 0, "missed_turns": 0}},
+        "start_time": time.time()
+    }
+    
+    await message.reply(
+        f"🎮 **ɢᴀᴍᴇ ʟᴏʙʙʏ ᴄʀᴇᴀᴛᴇᴅ ʙʏ {message.from_user.mention}!**\n\n"
+        "🔹 **ᴜsᴇ** /joingame **ᴛᴏ ᴘᴀʀᴛɪᴄɪᴘᴀᴛᴇ**\n"
+        "🔹 **ᴍɪɴɪᴍᴜᴍ 2 ᴘʟᴀʏᴇʀs ʀᴇǫᴜɪʀᴇᴅ**\n"
+        "🔹 **ɢᴀᴍᴇ sᴛᴀʀᴛs ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʟʏ ɪɴ 2 ᴍɪɴᴜᴛᴇs**\n"
+        "🔹 **ʜᴏsᴛ ᴄᴀɴ** /forcestart **ᴛᴏ ʙᴇɢɪɴ ɪᴍᴍᴇᴅɪᴀᴛᴇʟʏ**\n\n"
+        "**ᴄᴜʀʀᴇɴᴛ ᴘʟᴀʏᴇʀs:**\n"
+        f"1. {message.from_user.mention} (ʜᴏsᴛ)"
+    )
+
+@bot.on_message(filters.command("joingame"))
+async def join_game(client: Client, message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if chat_id not in waiting_rooms:
+        await message.reply("❌ **ɴᴏ ᴀᴄᴛɪᴠᴇ ᴡᴀɪᴛɪɴɢ ʀᴏᴏᴍ. ᴜsᴇ** /startgame **ᴛᴏ ᴄʀᴇᴀᴛᴇ ᴏɴᴇ!**")
+        return
+    
+    if user_id in waiting_rooms[chat_id]["players"]:
+        await message.reply("⚠️ **ʏᴏᴜ'ᴠᴇ ᴀʟʀᴇᴀᴅʏ ᴊᴏɪɴᴇᴅ ᴛʜᴇ ɢᴀᴍᴇ!**")
+        return
+    
+    waiting_rooms[chat_id]["players"][user_id] = {
+        "name": message.from_user.mention,
+        "score": 0,
+        "missed_turns": 0
+    }
+    
+    players_list = "\n".join(
+        f"{i+1}. {player['name']}" 
+        for i, player in enumerate(waiting_rooms[chat_id]["players"].values())
+    )
+    
+    await message.reply(
+        f"✅ {message.from_user.mention} **ʜᴀs ᴊᴏɪɴᴇᴅ ᴛʜᴇ ɢᴀᴍᴇ!**\n\n"
+        f"**ᴄᴜʀʀᴇɴᴛ ᴘʟᴀʏᴇʀs** ({len(waiting_rooms[chat_id]['players'])}):\n"
+        f"{players_list}"
+    )
+
+@bot.on_message(filters.command("forcestart"))
+async def force_start(client: Client, message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if chat_id not in waiting_rooms:
+        await message.reply("❌ **ɴᴏ ᴀᴄᴛɪᴠᴇ ᴡᴀɪᴛɪɴɢ ʀᴏᴏᴍ ᴛᴏ sᴛᴀʀᴛ!**")
+        return
+    
+    if waiting_rooms[chat_id]["host"] != user_id:
+        await message.reply("🚫 **ᴏɴʟʏ ᴛʜᴇ ʜᴏsᴛ ᴄᴀɴ ғᴏʀᴄᴇ sᴛᴀʀᴛ ᴛʜᴇ ɢᴀᴍᴇ!**")
+        return
+    
+    if len(waiting_rooms[chat_id]["players"]) < 2:
+        await message.reply("⚠️ **ɴᴇᴇᴅ ᴀᴛ ʟᴇᴀsᴛ 2 ᴘʟᴀʏᴇʀs ᴛᴏ sᴛᴀʀᴛ!**")
+        return
+    
+    await start_actual_game(chat_id)
+
+async def start_actual_game(chat_id):
+    if chat_id not in waiting_rooms:
+        return
+    
+    players = waiting_rooms[chat_id]["players"]
+    del waiting_rooms[chat_id]
+    
+    # Initialize game
+    active_games[chat_id] = {
+        "players": players,
+        "current_turn": random.choice(list(players.keys())),
+        "round": 1,
+        "character": None,
+        "start_time": time.time(),
+        "last_activity": time.time(),
+        "waiting_for_guess": False
+    }
+    
+    # Start first turn
+    await start_new_turn(chat_id)
+
+async def start_new_turn(chat_id):
+    if chat_id not in active_games:
+        return
+    
+    game = active_games[chat_id]
+    current_player_id = game["current_turn"]
+    current_player = game["players"][current_player_id]
+    
+    # Get new character
+    rarity, pipeline = get_random_character_weighted()
+    character = await collection.aggregate(pipeline).to_list(1)
+    if not character:
+        await bot.send_message(chat_id, "❌ **ғᴀɪʟᴇᴅ ᴛᴏ ɢᴇᴛ ᴄʜᴀʀᴀᴄᴛᴇʀ. ᴇɴᴅɪɴɢ ɢᴀᴍᴇ.**")
+        del active_games[chat_id]
+        return
+    
+    character = character[0]
+    game["character"] = character
+    game["last_activity"] = time.time()
+    game["waiting_for_guess"] = True
+    
+    # Send character image
+    caption = (
+        f"🎴 **ʀᴏᴜɴᴅ {game['round']}** | {current_player['name']}'s ᴛᴜʀɴ!\n"
+        f"⏳ **ʏᴏᴜ ʜᴀᴠᴇ 2 ᴍɪɴᴜᴛᴇs ᴛᴏ ɢᴜᴇss ᴛʜɪs ᴄʜᴀʀᴀᴄᴛᴇʀ!**\n"
+        f"💡 **ʜɪɴᴛ:** ғʀᴏᴍ {character['anime']}\n\n"
+        f"🏆 **ᴄᴜʀʀᴇɴᴛ sᴄᴏʀᴇs:**\n" +
+        "\n".join(f"{p['name']}: {p['score']}" for p in game["players"].values())
+    )
+    
+    await bot.send_photo(
+        chat_id,
+        character["img_url"],
+        caption=caption
+    )
+    
+    # Start timer
+    asyncio.create_task(turn_timer(chat_id))
+
+async def turn_timer(chat_id):
+    await asyncio.sleep(120)  # 2 minutes
+    
+    if chat_id not in active_games:
+        return
+    
+    game = active_games[chat_id]
+    if not game["waiting_for_guess"]:  # Someone answered
+        return
+    
+    current_player_id = game["current_turn"]
+    game["players"][current_player_id]["missed_turns"] += 1
+    
+    # Check if player should be eliminated
+    if game["players"][current_player_id]["missed_turns"] >= 2:
+        await bot.send_message(
+            chat_id,
+            f"⏰ **ᴛɪᴍᴇ's ᴜᴘ!** {game['players'][current_player_id]['name']} ᴍɪssᴇᴅ ᴛʜᴇɪʀ ᴛᴜʀɴ ᴛᴡɪᴄᴇ ᴀɴᴅ ɪs ᴇʟɪᴍɪɴᴀᴛᴇᴅ!"
+        )
+        del game["players"][current_player_id]
+    else:
+        await bot.send_message(
+            chat_id,
+            f"⏰ **ᴛɪᴍᴇ's ᴜᴘ!** {game['players'][current_player_id]['name']} ᴍɪssᴇᴅ ᴛʜᴇɪʀ ᴛᴜʀɴ!"
+        )
+    
+    # Check if game should end
+    if len(game["players"]) < 2:
+        await end_game(chat_id)
+        return
+    
+    # Move to next turn
+    game["waiting_for_guess"] = False
+    await next_turn(chat_id)
+
+async def next_turn(chat_id):
+    if chat_id not in active_games:
+        return
+    
+    game = active_games[chat_id]
+    player_ids = list(game["players"].keys())
+    current_index = player_ids.index(game["current_turn"])
+    next_index = (current_index + 1) % len(player_ids)
+    game["current_turn"] = player_ids[next_index]
+    game["round"] += 1
+    
+    await start_new_turn(chat_id)
+
+async def end_game(chat_id):
+    if chat_id not in active_games:
+        return
+    
+    game = active_games[chat_id]
+    winner_id, winner_data = max(game["players"].items(), key=lambda x: x[1]["score"])
+    
+    # Update user stats
+    for player_id, player_data in game["players"].items():
+        user_data = await get_user_data(player_id)
+        update_data = {
+            "games_played": user_data.get("games_played", 0) + 1,
+            "xp": user_data.get("xp", 0) + (XP_PER_GUESS * player_data["score"])
+        }
+        
+        if player_id == winner_id:
+            update_data["games_won"] = user_data.get("games_won", 0) + 1
+            update_data["xp"] += XP_BONUS["game_win"]
+        
+        await update_user_data(player_id, update_data)
+    
+    # Announce winner
+    await bot.send_message(
+        chat_id,
+        f"🏆 **ɢᴀᴍᴇ ᴏᴠᴇʀ!** 🏆\n\n"
+        f"🎉 {winner_data['name']} ᴡɪɴs ᴡɪᴛʜ {winner_data['score']} ᴘᴏɪɴᴛs!\n\n"
+        f"ғɪɴᴀʟ sᴄᴏʀᴇs:\n" +
+        "\n".join(
+            f"{i+1}. {p['name']}: {p['score']}" 
+            for i, p in enumerate(sorted(
+                game["players"].values(),
+                key=lambda x: x["score"],
+                reverse=True
+            ))
+        )
+    )
+    
+    del active_games[chat_id]
+
+@bot.on_message(filters.text & filters.group)
+async def handle_guess(client: Client, message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if chat_id not in active_games:
+        return
+    
+    game = active_games[chat_id]
+    if not game["waiting_for_guess"] or user_id != game["current_turn"]:
+        return
+    
+    guess = message.text.strip()
+    character_name = game["character"]["name"]
+    
+    user_data = await get_user_data(user_id)
+    
+    if is_correct_guess(guess, character_name):
+        # Correct guess
+        game["players"][user_id]["score"] += 1
+        game["players"][user_id]["missed_turns"] = 0
+        game["waiting_for_guess"] = False
+        
+        # Update user stats
+        xp_earned = XP_PER_GUESS + XP_BONUS["correct_guess"]
+        if game["character"]["rarity"] != "⚫ Common":
+            xp_earned += XP_BONUS["rare_character"]
+        
+        await update_user_data(user_id, {
+            "correct_guesses": user_data.get("correct_guesses", 0) + 1,
+            "guesses": user_data.get("guesses", 0) + 1,
+            "xp": user_data.get("xp", 0) + xp_earned
+        })
+        
+        await message.reply(
+            f"✅ **ᴄᴏʀʀᴇᴄᴛ!** {message.from_user.mention} ɢᴜᴇssᴇᴅ ɪᴛ!\n"
+            f"🎉 **+1 ᴘᴏɪɴᴛ!** ʏᴏᴜ'ᴠᴇ ᴇᴀʀɴᴇᴅ {xp_earned} xᴘ!\n"
+            f"🌟 **ᴄʜᴀʀᴀᴄᴛᴇʀ:** {character_name} ({game['character']['anime']})"
+        )
+        
+        # Move to next turn
+        await next_turn(chat_id)
+    else:
+        # Incorrect guess - only update guesses count
+        await update_user_data(user_id, {
+            "guesses": user_data.get("guesses", 0) + 1
+        })
+
+# Stats and achievements
+@bot.on_message(filters.command("mystats"))
+async def my_stats(client: Client, message: Message):
+    user_id = message.from_user.id
+    user_data = await get_user_data(user_id)
+    
+    level = calculate_level(user_data.get("xp", 0))
+    next_level_xp = (level ** 2) * 1000
+    progress = (user_data.get("xp", 0) / next_level_xp) * 100 if next_level_xp > 0 else 0
+    
+    stats_text = (
+        f"📊 **{message.from_user.mention}'s sᴛᴀᴛs**\n\n"
+        f"🏅 **ʟᴇᴠᴇʟ:** {level}\n"
+        f"✨ **xᴘ:** {user_data.get('xp', 0)}/{next_level_xp} ({progress:.1f}%)\n\n"
+        f"🔹 **ᴛᴏᴛᴀʟ ᴄʜᴀʀᴀᴄᴛᴇʀs:** {len(user_data.get('characters', []))}\n"
+        f"🔹 **ᴛᴏᴛᴀʟ ɢᴜᴇssᴇs:** {user_data.get('guesses', 0)}\n"
+        f"🔹 **ᴄᴏʀʀᴇᴄᴛ ɢᴜᴇssᴇs:** {user_data.get('correct_guesses', 0)}\n"
+        f"🔹 **ɢᴀᴍᴇs ᴘʟᴀʏᴇᴅ:** {user_data.get('games_played', 0)}\n"
+        f"🔹 **ɢᴀᴍᴇs �ᴏɴ:** {user_data.get('games_won', 0)}\n\n"
+        f"🎮 **ᴀᴄʜɪᴇᴠᴇᴍᴇɴᴛ ᴘʀᴏɢʀᴇss:**\n"
+    )
+    
+    # Add achievement progress
+    for level, req in achievement_levels.items():
+        achieved = user_data.get("guesses", 0) >= req["guesses"]
+        claimed = user_data.get("achievement_claims", {}).get(str(level), False)
+        status = "✅" if claimed else "☑️" if achieved else "❌"
+        stats_text += (
+            f"ʟᴇᴠᴇʟ {level}: {req['guesses']} ɢᴜᴇssᴇs {status} "
+            f"(ʀᴇᴡᴀʀᴅ: {rarity_system[req['reward']]['emoji']} x{req['claims']})\n"
+        )
+    
+    await message.reply(stats_text)
+
+@bot.on_message(filters.command("achievements"))
+async def achievements(client: Client, message: Message):
+    user_id = message.from_user.id
+    user_data = await get_user_data(user_id)
+    
+    keyboard = []
+    for i in range(1, 11):
+        req = achievement_levels[i]
+        achieved = user_data.get("guesses", 0) >= req["guesses"]
+        claimed = user_data.get("achievement_claims", {}).get(str(i), False)
+        
+        if achieved and not claimed:
+            text = f"ᴄʟᴀɪᴍ ʟᴇᴠᴇʟ {i} ʀᴇᴡᴀʀᴅ"
+            callback = f"claim_{i}"
+        elif claimed:
+            text = f"ʟᴇᴠᴇʟ {i} ✅ ᴄʟᴀɪᴍᴇᴅ"
+            callback = f"claimed_{i}"
+        else:
+            text = f"ʟᴇᴠᴇʟ {i} ({user_data.get('guesses', 0)}/{req['guesses']})"
+            callback = f"locked_{i}"
+        
+        keyboard.append([InlineKeyboardButton(text, callback_data=callback)])
+    
+    await message.reply(
+        "🏆 **ᴀᴄʜɪᴇᴠᴇᴍᴇɴᴛ ʀᴇᴡᴀʀᴅs**\n\n"
+        "ᴇᴀʀɴ ʀᴇᴡᴀʀᴅs ʙʏ ᴍᴀᴋɪɴɢ ᴄᴏʀʀᴇᴄᴛ ɢᴜᴇssᴇs ɪɴ ᴛʜᴇ ɢᴀᴍᴇ!\n"
+        "ᴄʟɪᴄᴋ ᴛᴏ ᴄʟᴀɪᴍ ᴀᴠᴀɪʟᴀʙʟᴇ ʀᴇᴡᴀʀᴅs:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+@bot.on_callback_query()
+async def handle_achievement_claim(client: Client, callback_query: CallbackQuery):
+    data = callback_query.data
+    user_id = callback_query.from_user.id
+    
+    if data.startswith("claim_"):
+        level = int(data.split("_")[1])
+        user_data = await get_user_data(user_id)
+        
+        if (user_data.get("guesses", 0) >= achievement_levels[level]["guesses"] and 
+            not user_data.get("achievement_claims", {}).get(str(level), False)):
+            
+            # Get reward characters
+            reward_rarity = achievement_levels[level]["reward"]
+            count = achievement_levels[level]["claims"]
+            characters = []
+            
+            for _ in range(count):
+                _, pipeline = get_random_character_weighted()
+                character = await collection.aggregate(pipeline).to_list(1)
+                if character:
+                    characters.append(character[0])
+            
+            if characters:
+                # Add characters to user's collection
+                await user_collection.update_one(
+                    {"id": user_id},
+                    {
+                        "$push": {"characters": {"$each": characters}},
+                        "$set": {f"achievement_claims.{level}": True}
+                    }
+                )
+                
+                reward_text = "\n".join(
+                    f"🌟 {c['name']} ({c['anime']}) - {c['rarity']}"
+                    for c in characters
+                )
+                
+                await callback_query.answer(f"🎉 ʏᴏᴜ ʀᴇᴄᴇɪᴠᴇᴅ {count} {reward_rarity} ᴄʜᴀʀᴀᴄᴛᴇʀs!")
+                await callback_query.message.edit(
+                    text=f"🎁 **ʀᴇᴡᴀʀᴅ ᴄʟᴀɪᴍᴇᴅ!** ʏᴏᴜ ʀᴇᴄᴇɪᴠᴇᴅ:\n\n{reward_text}",
+                    reply_markup=None
+                )
+            else:
+                await callback_query.answer("❌ ғᴀɪʟᴇᴅ ᴛᴏ ɢᴇᴛ ʀᴇᴡᴀʀᴅ ᴄʜᴀʀᴀᴄᴛᴇʀs. ᴛʀʏ ᴀɢᴀɪɴ ʟᴀᴛᴇʀ.")
+        else:
+            await callback_query.answer("⚠️ ʏᴏᴜ ᴄᴀɴ'ᴛ ᴄʟᴀɪᴍ ᴛʜɪs ʀᴇᴡᴀʀᴅ ʏᴇᴛ!")
+    elif data.startswith("locked_"):
+        level = int(data.split("_")[1])
+        req = achievement_levels[level]
+        await callback_query.answer(f"🔒 ʏᴏᴜ ɴᴇᴇᴅ {req['guesses']} ᴛᴏᴛᴀʟ ɢᴜᴇssᴇs ᴛᴏ ᴜɴʟᴏᴄᴋ ᴛʜɪs ʀᴇᴡᴀʀᴅ!")
+    elif data.startswith("claimed_"):
+        await callback_query.answer("✅ ʏᴏᴜ'ᴠᴇ ᴀʟʀᴇᴀᴅʏ ᴄʟᴀɪᴍᴇᴅ ᴛʜɪs ʀᴇᴡᴀʀᴅ!")
+
+# Auto-start game after 2 minutes
+async def auto_start_check():
+    while True:
+        current_time = time.time()
+        for chat_id, room in list(waiting_rooms.items()):
+            if current_time - room["start_time"] > 120 and len(room["players"]) >= 2:
+                await start_actual_game(chat_id)
+        
+        await asyncio.sleep(10)
+
+# Start the auto-start checker when bot starts
+async def startup():
+    asyncio.create_task(auto_start_check())
+
+bot.run(startup())

@@ -1,0 +1,595 @@
+import random
+import string
+from datetime import datetime, timedelta
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from . import app, user_collection
+import humanize
+
+# Tiny caps font style mapping
+TINY_FONT_MAP = {
+    'a': 'ᴀ', 'b': 'ʙ', 'c': 'ᴄ', 'd': 'ᴅ', 'e': 'ᴇ', 'f': 'ғ', 'g': 'ɢ',
+    'h': 'ʜ', 'i': 'ɪ', 'j': 'ᴊ', 'k': 'ᴋ', 'l': 'ʟ', 'm': 'ᴍ', 'n': 'ɴ',
+    'o': 'ᴏ', 'p': 'ᴘ', 'q': 'ǫ', 'r': 'ʀ', 's': 's', 't': 'ᴛ', 'u': 'ᴜ',
+    'v': 'ᴠ', 'w': 'ᴡ', 'x': 'x', 'y': 'ʏ', 'z': 'ᴢ',
+    'A': 'ᴀ', 'B': 'ʙ', 'C': 'ᴄ', 'D': 'ᴅ', 'E': 'ᴇ', 'F': 'ғ', 'G': 'ɢ',
+    'H': 'ʜ', 'I': 'ɪ', 'J': 'ᴊ', 'K': 'ᴋ', 'L': 'ʟ', 'M': 'ᴍ', 'N': 'ɴ',
+    'O': 'ᴏ', 'P': 'ᴘ', 'Q': 'ǫ', 'R': 'ʀ', 'S': 's', 'T': 'ᴛ', 'U': 'ᴜ',
+    'V': 'ᴠ', 'W': 'ᴡ', 'X': 'x', 'Y': 'ʏ', 'Z': 'ᴢ',
+    ' ': ' ', '!': '!', '?': '?', '.': '.', ':': ':', '(': '(', ')': ')',
+    '0': '0', '1': '1', '2': '2', '3': '3', '4': '4', '5': '5', '6': '6',
+    '7': '7', '8': '8', '9': '9'
+}
+
+def convert_to_tiny(text):
+    """Convert normal text to tiny caps style"""
+    return ''.join(TINY_FONT_MAP.get(c, c) for c in text)
+
+# SQUID GAME SYSTEM
+class SquidGame:
+    def __init__(self):
+        self.active_games = {}
+        self.player_stats = {}
+        self.game_counter = 1
+        self.min_players = 5
+        self.max_players = 20
+        self.entry_fee = 1000  # Gold coins
+        self.prize_pool_multiplier = 2.5
+        self.game_duration = timedelta(hours=1)
+        
+        # Game missions
+        self.missions = {
+            1: {
+                "name": "Red Light Green Light",
+                "description": "Players must cross the finish line without being caught moving during red light",
+                "elimination_rate": 0.4,
+                "duration": 10  # minutes
+            },
+            2: {
+                "name": "Honeycomb Challenge",
+                "description": "Players must carve out the shape from honeycomb without breaking it",
+                "elimination_rate": 0.3,
+                "duration": 15
+            },
+            3: {
+                "name": "Tug of War",
+                "description": "Teams compete in a strength battle over a pit",
+                "elimination_rate": 0.5,
+                "duration": 5
+            },
+            4: {
+                "name": "Marbles",
+                "description": "Players compete in pairs with marbles games",
+                "elimination_rate": 0.5,
+                "duration": 20
+            },
+            5: {
+                "name": "Glass Bridge",
+                "description": "Players must choose the correct glass panels to cross",
+                "elimination_rate": 0.7,
+                "duration": 25
+            },
+            6: {
+                "name": "Squid Game Finale",
+                "description": "The final two players compete in the squid game",
+                "elimination_rate": 0.5,
+                "duration": 30
+            }
+        }
+
+    async def create_game(self, creator_id):
+        game_id = f"SG-{self.game_counter:04d}"
+        self.game_counter += 1
+        
+        self.active_games[game_id] = {
+            "creator": creator_id,
+            "players": [creator_id],
+            "status": "waiting",
+            "start_time": None,
+            "current_mission": 0,
+            "eliminated": [],
+            "prize_pool": self.entry_fee,
+            "game_log": []
+        }
+        
+        return game_id
+
+    async def add_player(self, game_id, user_id, user_data):
+        if game_id not in self.active_games:
+            return False, "Game not found"
+            
+        game = self.active_games[game_id]
+        
+        if len(game["players"]) >= self.max_players:
+            return False, "Game is full"
+            
+        if user_id in game["players"]:
+            return False, "You're already in this game"
+            
+        if user_data.get("gold", 0) < self.entry_fee:
+            return False, f"You need {self.entry_fee} gold to join"
+            
+        game["players"].append(user_id)
+        game["prize_pool"] += self.entry_fee
+        return True, "Successfully joined the game"
+
+    async def start_game(self, game_id):
+        if game_id not in self.active_games:
+            return False, "Game not found"
+            
+        game = self.active_games[game_id]
+        
+        if len(game["players"]) < self.min_players:
+            return False, f"Need at least {self.min_players} players to start"
+            
+        game["status"] = "in_progress"
+        game["start_time"] = datetime.now()
+        game["current_mission"] = 1
+        
+        # Initialize player stats
+        for player in game["players"]:
+            self.player_stats[player] = {
+                "survived_missions": 0,
+                "eliminated_at": None,
+                "performance": {}
+            }
+        
+        return True, "Game started!"
+
+    async def run_mission(self, game_id):
+        if game_id not in self.active_games:
+            return False, "Game not found"
+            
+        game = self.active_games[game_id]
+        
+        if game["status"] != "in_progress":
+            return False, "Game is not in progress"
+            
+        current_mission = game["current_mission"]
+        mission_data = self.missions.get(current_mission)
+        
+        if not mission_data:
+            return False, "Invalid mission"
+            
+        remaining_players = [p for p in game["players"] if p not in game["eliminated"]]
+        
+        # Eliminate players based on mission rate
+        elimination_count = int(len(remaining_players) * mission_data["elimination_rate"])
+        eliminated = random.sample(remaining_players, elimination_count)
+        
+        game["eliminated"].extend(eliminated)
+        game["current_mission"] += 1
+        
+        # Update player stats
+        for player in remaining_players:
+            if player not in eliminated:
+                self.player_stats[player]["survived_missions"] += 1
+                
+        for player in eliminated:
+            self.player_stats[player]["eliminated_at"] = current_mission
+            
+        # Log mission results
+        mission_log = {
+            "mission": current_mission,
+            "name": mission_data["name"],
+            "eliminated": eliminated,
+            "survivors": [p for p in remaining_players if p not in eliminated]
+        }
+        
+        game["game_log"].append(mission_log)
+        
+        # Check if game should end
+        if len([p for p in game["players"] if p not in game["eliminated"]]) <= 1:
+            await self.end_game(game_id)
+            return True, "Final mission completed!"
+            
+        return True, f"Mission {current_mission} completed"
+
+    async def end_game(self, game_id):
+        if game_id not in self.active_games:
+            return False, "Game not found"
+            
+        game = self.active_games[game_id]
+        game["status"] = "completed"
+        
+        # Determine winner(s)
+        remaining_players = [p for p in game["players"] if p not in game["eliminated"]]
+        
+        if remaining_players:
+            winner = remaining_players[0]
+            prize = int(game["prize_pool"] * self.prize_pool_multiplier)
+            
+            # Update winner's gold
+            await user_collection.update_one(
+                {"id": winner},
+                {"$inc": {"gold": prize}},
+                upsert=True
+            )
+            
+            game["winner"] = winner
+            game["prize"] = prize
+            
+        return True, "Game completed"
+
+squid_game = SquidGame()
+
+# SQUID GAME COMMANDS
+
+# Create new game
+@app.on_message(filters.command("squidcreate"))
+async def create_squid_game(client: Client, message: Message):
+    user_id = message.from_user.id
+    user_data = await user_collection.find_one({"id": user_id})
+    
+    if not user_data:
+        await message.reply_text(convert_to_tiny("⚠️ ʏᴏᴜ ɴᴇᴇᴅ ᴛᴏ ʙᴇ ʀᴇɢɪsᴛᴇʀᴇᴅ ᴛᴏ ᴄʀᴇᴀᴛᴇ ᴀ ɢᴀᴍᴇ"))
+        return
+    
+    if user_data.get("gold", 0) < squid_game.entry_fee:
+        await message.reply_text(convert_to_tiny(f"⚠️ ʏᴏᴜ ɴᴇᴇᴅ {squid_game.entry_fee} ɢᴏʟᴅ ᴛᴏ ᴄʀᴇᴀᴛᴇ ᴀ ɢᴀᴍᴇ"))
+        return
+    
+    game_id = await squid_game.create_game(user_id)
+    
+    # Deduct entry fee
+    await user_collection.update_one(
+        {"id": user_id},
+        {"$inc": {"gold": -squid_game.entry_fee}},
+        upsert=True
+    )
+    
+    await message.reply_text(
+        convert_to_tiny(
+            f"🎮 **sǫᴜɪᴅ ɢᴀᴍᴇ ᴄʀᴇᴀᴛᴇᴅ!**\n\n"
+            f"🆔 ɢᴀᴍᴇ ɪᴅ: `{game_id}`\n"
+            f"👥 ᴘʟᴀʏᴇʀs: 1/{squid_game.max_players}\n"
+            f"💰 ᴇɴᴛʀʏ ғᴇᴇ: {squid_game.entry_fee} ₲\n"
+            f"🏆 ᴘʀɪᴢᴇ ᴘᴏᴏʟ: {squid_game.entry_fee * squid_game.prize_pool_multiplier} ₲\n\n"
+            f"ᴏᴛʜᴇʀs ᴄᴀɴ ᴊᴏɪɴ ᴡɪᴛʜ /squidjoin {game_id}\n"
+            f"sᴛᴀʀᴛ ᴡɪᴛʜ /squidstart {game_id} ᴡʜᴇɴ ʀᴇᴀᴅʏ"
+        ),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Refresh", callback_data=f"sg_refresh_{game_id}")]
+        ])
+    )
+
+# Join game
+@app.on_message(filters.command("squidjoin"))
+async def join_squid_game(client: Client, message: Message):
+    user_id = message.from_user.id
+    args = message.text.split()
+    
+    if len(args) < 2:
+        await message.reply_text(convert_to_tiny("⚠️ ᴘʟᴇᴀsᴇ sᴘᴇᴄɪғʏ ᴀ ɢᴀᴍᴇ ɪᴅ\nᴜsᴇ: /squidjoin <ɢᴀᴍᴇ_ɪᴅ>"))
+        return
+    
+    game_id = args[1].upper()
+    user_data = await user_collection.find_one({"id": user_id})
+    
+    if not user_data:
+        await message.reply_text(convert_to_tiny("⚠️ ʏᴏᴜ ɴᴇᴇᴅ ᴛᴏ ʙᴇ ʀᴇɢɪsᴛᴇʀᴇᴅ ᴛᴏ ᴊᴏɪɴ ᴀ ɢᴀᴍᴇ"))
+        return
+    
+    success, response = await squid_game.add_player(game_id, user_id, user_data)
+    
+    if success:
+        # Deduct entry fee
+        await user_collection.update_one(
+            {"id": user_id},
+            {"$inc": {"gold": -squid_game.entry_fee}},
+            upsert=True
+        )
+        
+        game = squid_game.active_games[game_id]
+        await message.reply_text(
+            convert_to_tiny(
+                f"✅ ʏᴏᴜ'ᴠᴇ ᴊᴏɪɴᴇᴅ ɢᴀᴍᴇ {game_id}!\n\n"
+                f"👥 ᴘʟᴀʏᴇʀs: {len(game['players'])}/{squid_game.max_players}\n"
+                f"💰 ᴇɴᴛʀʏ ғᴇᴇ: {squid_game.entry_fee} ₲\n"
+                f"🏆 ᴘʀɪᴢᴇ ᴘᴏᴏʟ: {game['prize_pool'] * squid_game.prize_pool_multiplier} ₲\n\n"
+                f"ᴡᴀɪᴛɪɴɢ ғᴏʀ ɢᴀᴍᴇ ᴛᴏ sᴛᴀʀᴛ..."
+            ),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Refresh", callback_data=f"sg_refresh_{game_id}")]
+            ])
+        )
+    else:
+        await message.reply_text(convert_to_tiny(f"⚠️ {response}"))
+
+# Start game
+@app.on_message(filters.command("squidstart") & filters.user(7861332030))
+async def start_squid_game(client: Client, message: Message):
+    args = message.text.split()
+    
+    if len(args) < 2:
+        await message.reply_text(convert_to_tiny("⚠️ ᴘʟᴇᴀsᴇ sᴘᴇᴄɪғʏ ᴀ ɢᴀᴍᴇ ɪᴅ\nᴜsᴇ: /squidstart <ɢᴀᴍᴇ_ɪᴅ>"))
+        return
+    
+    game_id = args[1].upper()
+    success, response = await squid_game.start_game(game_id)
+    
+    if success:
+        game = squid_game.active_games[game_id]
+        mission = squid_game.missions[1]
+        
+        await message.reply_text(
+            convert_to_tiny(
+                f"🔴 🟢 ɢᴀᴍᴇ sᴛᴀʀᴛᴇᴅ! 🔴 🟢\n\n"
+                f"🆔 ɢᴀᴍᴇ ɪᴅ: `{game_id}`\n"
+                f"👥 ᴘʟᴀʏᴇʀs: {len(game['players'])}\n"
+                f"🏆 ᴘʀɪᴢᴇ ᴘᴏᴏʟ: {game['prize_pool'] * squid_game.prize_pool_multiplier} ₲\n\n"
+                f"─────── ⋆⋅☆⋅⋆ ───────\n"
+                f"🎯 ᴍɪssɪᴏɴ 1: {mission['name']}\n"
+                f"📝 {mission['description']}\n"
+                f"⏱ ᴅᴜʀᴀᴛɪᴏɴ: {mission['duration']} ᴍɪɴs\n"
+                f"☠️ ᴇʟɪᴍɪɴᴀᴛɪᴏɴ ʀᴀᴛᴇ: {mission['elimination_rate']*100}%\n\n"
+                f"ɢᴏᴏᴅ ʟᴜᴄᴋ ᴇᴠᴇʀʏᴏɴᴇ!"
+            ),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⏭ Next Mission", callback_data=f"sg_next_{game_id}")]
+            ])
+        )
+    else:
+        await message.reply_text(convert_to_tiny(f"⚠️ {response}"))
+
+# Next mission
+@app.on_callback_query(filters.regex(r"^sg_next_(.*)$"))
+async def next_mission(client, callback_query):
+    game_id = callback_query.matches[0].group(1)
+    success, response = await squid_game.run_mission(game_id)
+    
+    if success:
+        game = squid_game.active_games[game_id]
+        
+        if game["status"] == "completed":
+            # Game ended
+            winner = game.get("winner")
+            prize = game.get("prize", 0)
+            
+            await callback_query.message.edit_text(
+                convert_to_tiny(
+                    f"🎉 **ɢᴀᴍᴇ ᴏᴠᴇʀ!** 🎉\n\n"
+                    f"🆔 ɢᴀᴍᴇ ɪᴅ: `{game_id}`\n"
+                    f"👥 ᴏʀɪɢɪɴᴀʟ ᴘʟᴀʏᴇʀs: {len(game['players'])}\n"
+                    f"🏆 ᴘʀɪᴢᴇ: {prize} ₲\n\n"
+                    f"─────── ⋆⋅☆⋅⋆ ───────\n"
+                    f"🎖️ **ᴡɪɴɴᴇʀ**: {(await client.get_users(winner)).mention}\n"
+                    f"💰 **ᴘʀɪᴢᴇ ᴡᴏɴ**: {prize} ₲\n\n"
+                    f"ᴛʜᴀɴᴋ ʏᴏᴜ ғᴏʀ ᴘʟᴀʏɪɴɢ!"
+                )
+            )
+            return
+        
+        current_mission = game["current_mission"]
+        mission = squid_game.missions[current_mission]
+        remaining_players = [p for p in game["players"] if p not in game["eliminated"]]
+        
+        await callback_query.message.edit_text(
+            convert_to_tiny(
+                f"🎯 **ɴᴇxᴛ ᴍɪssɪᴏɴ sᴛᴀʀᴛᴇᴅ!**\n\n"
+                f"🆔 ɢᴀᴍᴇ ɪᴅ: `{game_id}`\n"
+                f"👥 ʀᴇᴍᴀɪɴɪɴɢ ᴘʟᴀʏᴇʀs: {len(remaining_players)}\n\n"
+                f"─────── ⋆⋅☆⋅⋆ ───────\n"
+                f"🎯 ᴍɪssɪᴏɴ {current_mission}: {mission['name']}\n"
+                f"📝 {mission['description']}\n"
+                f"⏱ ᴅᴜʀᴀᴛɪᴏɴ: {mission['duration']} ᴍɪɴs\n"
+                f"☠️ ᴇʟɪᴍɪɴᴀᴛɪᴏɴ ʀᴀᴛᴇ: {mission['elimination_rate']*100}%\n\n"
+                f"ɢᴏᴏᴅ ʟᴜᴄᴋ sᴜʀᴠɪᴠᴏʀs!"
+            ),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⏭ Next Mission", callback_data=f"sg_next_{game_id}")]
+            ])
+        )
+    else:
+        await callback_query.answer(response, show_alert=True)
+
+# Game status
+@app.on_message(filters.command("squidstatus"))
+async def game_status(client: Client, message: Message):
+    args = message.text.split()
+    
+    if len(args) < 2:
+        await message.reply_text(convert_to_tiny("⚠️ ᴘʟᴇᴀsᴇ sᴘᴇᴄɪғʏ ᴀ ɢᴀᴍᴇ ɪᴅ\nᴜsᴇ: /squidstatus <ɢᴀᴍᴇ_ɪᴅ>"))
+        return
+    
+    game_id = args[1].upper()
+    
+    if game_id not in squid_game.active_games:
+        await message.reply_text(convert_to_tiny("⚠️ ɢᴀᴍᴇ ɴᴏᴛ ғᴏᴜɴᴅ ᴏʀ ᴀʟʀᴇᴀᴅʏ ᴄᴏᴍᴘʟᴇᴛᴇᴅ"))
+        return
+    
+    game = squid_game.active_games[game_id]
+    creator = await client.get_users(game["creator"])
+    
+    if game["status"] == "waiting":
+        status_text = (
+            f"🕒 **ɢᴀᴍᴇ ᴡᴀɪᴛɪɴɢ ғᴏʀ ᴘʟᴀʏᴇʀs**\n\n"
+            f"🆔 ɢᴀᴍᴇ ɪᴅ: `{game_id}`\n"
+            f"👤 ᴄʀᴇᴀᴛᴏʀ: {creator.mention}\n"
+            f"👥 ᴘʟᴀʏᴇʀs: {len(game['players'])}/{squid_game.max_players}\n"
+            f"💰 ᴇɴᴛʀʏ ғᴇᴇ: {squid_game.entry_fee} ₲\n"
+            f"🏆 ᴘʀɪᴢᴇ ᴘᴏᴏʟ: {game['prize_pool'] * squid_game.prize_pool_multiplier} ₲\n\n"
+            f"ᴊᴏɪɴ ᴡɪᴛʜ /squidjoin {game_id}"
+        )
+    elif game["status"] == "in_progress":
+        current_mission = game["current_mission"]
+        mission = squid_game.missions.get(current_mission, {})
+        remaining_players = [p for p in game["players"] if p not in game["eliminated"]]
+        
+        status_text = (
+            f"🎮 **ɢᴀᴍᴇ ɪɴ ᴘʀᴏɢʀᴇss**\n\n"
+            f"🆔 ɢᴀᴍᴇ ɪᴅ: `{game_id}`\n"
+            f"👤 ᴄʀᴇᴀᴛᴏʀ: {creator.mention}\n"
+            f"👥 ʀᴇᴍᴀɪɴɪɴɢ ᴘʟᴀʏᴇʀs: {len(remaining_players)}\n"
+            f"🎯 ᴄᴜʀʀᴇɴᴛ ᴍɪssɪᴏɴ: {mission.get('name', 'Unknown')} ({current_mission}/6)\n\n"
+            f"🏆 ᴘʀɪᴢᴇ ᴘᴏᴏʟ: {game['prize_pool'] * squid_game.prize_pool_multiplier} ₲"
+        )
+    else:
+        winner = game.get("winner")
+        prize = game.get("prize", 0)
+        
+        status_text = (
+            f"🎉 **ɢᴀᴍᴇ ᴄᴏᴍᴘʟᴇᴛᴇᴅ!**\n\n"
+            f"🆔 ɢᴀᴍᴇ ɪᴅ: `{game_id}`\n"
+            f"👤 ᴄʀᴇᴀᴛᴏʀ: {creator.mention}\n"
+            f"👥 ᴏʀɪɢɪɴᴀʟ ᴘʟᴀʏᴇʀs: {len(game['players'])}\n\n"
+            f"🎖️ **ᴡɪɴɴᴇʀ**: {(await client.get_users(winner)).mention if winner else 'None'}\n"
+            f"💰 **ᴘʀɪᴢᴇ ᴡᴏɴ**: {prize} ₲"
+        )
+    
+    await message.reply_text(convert_to_tiny(status_text))
+
+# Player stats
+@app.on_message(filters.command("squidstats"))
+async def player_stats(client: Client, message: Message):
+    user_id = message.from_user.id
+    stats = squid_game.player_stats.get(user_id, {})
+    
+    if not stats:
+        await message.reply_text(convert_to_tiny("⚠️ ʏᴏᴜ ʜᴀᴠᴇɴ'ᴛ ᴘʟᴀʏᴇᴅ ᴀɴʏ sǫᴜɪᴅ ɢᴀᴍᴇs ʏᴇᴛ"))
+        return
+    
+    missions_survived = stats.get("survived_missions", 0)
+    eliminated_at = stats.get("eliminated_at", "Not eliminated")
+    
+    await message.reply_text(
+        convert_to_tiny(
+            f"📊 **ʏᴏᴜʀ sǫᴜɪᴅ ɢᴀᴍᴇ sᴛᴀᴛs**\n\n"
+            f"🎯 ᴍɪssɪᴏɴs sᴜʀᴠɪᴠᴇᴅ: {missions_survived}/6\n"
+            f"☠️ ᴇʟɪᴍɪɴᴀᴛᴇᴅ ᴀᴛ: {'Mission ' + str(eliminated_at) if eliminated_at != 'Not eliminated' else eliminated_at}\n\n"
+            f"ᴊᴏɪɴ ᴀ ɴᴇᴡ ɢᴀᴍᴇ ᴡɪᴛʜ /squidjoin"
+        )
+    )
+
+# GOLD COMMAND (Enhanced)
+@app.on_message(filters.command("mygold"))
+async def check_gold(client: Client, message: Message):
+    user = message.from_user
+    if not user:
+        await message.reply_text(convert_to_tiny("⚠️ ᴜɴᴀʙʟᴇ ᴛᴏ ɪᴅᴇɴᴛɪғʏ ᴜsᴇʀ. ᴘʟᴇᴀsᴇ ᴛʀʏ ᴀɢᴀɪɴ."))
+        return
+
+    user_id = user.id
+    mention = f"[{user.first_name}](tg://user?id={user_id})"
+    
+    # Fetch user data
+    user_data = await user_collection.find_one(
+        {'id': user_id},
+        projection={'gold': 1, 'first_name': 1, 'last_gold_emoji': 1}
+    )
+
+    # Get gold amount
+    gold_amount = user_data.get('gold', 0) if user_data else 0
+    
+    try:
+        gold_amount = float(str(gold_amount).replace(',', '')) if isinstance(gold_amount, str) else float(gold_amount)
+    except (ValueError, TypeError):
+        gold_amount = 0.0
+
+    # Get or generate gold emoji
+    gold_emoji = user_data.get('last_gold_emoji') if user_data else None
+    if not gold_emoji or gold_emoji not in GOLD_EMOJIS:
+        gold_emoji = await get_random_gold_emoji()
+        await user_collection.update_one(
+            {'id': user_id},
+            {'$set': {'last_gold_emoji': gold_emoji}},
+            upsert=True
+        )
+
+    # Formatting - always show exact number
+    formatted_gold = humanize.intcomma(gold_amount)
+    wealth_level = (
+        "ʙᴇɢɢᴀʀ" if gold_amount < 100 else
+        "ɴᴏᴠɪᴄᴇ" if gold_amount < 500 else
+        "ᴛʀᴀᴅᴇʀ" if gold_amount < 2000 else
+        "ᴍᴇʀᴄʜᴀɴᴛ" if gold_amount < 5000 else
+        "ʟᴏʀᴅ" if gold_amount < 10000 else
+        "ᴋɪɴɢ" if gold_amount < 50000 else
+        "ᴇᴍᴘᴇʀᴏʀ" if gold_amount < 100000 else
+        "ᴅʀᴀɢᴏɴ ʜᴏᴀʀᴅ"
+    )
+
+    # Create rich message
+    gold_message = (
+        f"✦ {mention}'s ᴡᴀʟʟᴇᴛ ✦\n"
+        "── ⋅ ⋅ ⋅ ⋅ ─── ⋅ ⋅ ─── ⋅ ⋅ ⋅ ⋅ ──\n\n"
+        f"{gold_emoji} **ᴀᴍᴏᴜɴᴛ**: `{formatted_gold}` ₲\n"
+        f"👑 **sᴛᴀᴛᴜs**: `{wealth_level}`\n\n"
+        f"💎 **sǫᴜɪᴅ ɢᴀᴍᴇ ᴇɴᴛʀʏ ғᴇᴇ**: {squid_game.entry_fee} ₲\n"
+        f"🎮 **ᴄᴜʀʀᴇɴᴛ ɢᴀᴍᴇs**: {len(squid_game.active_games)}\n\n"
+        "── ⋅ ⋅ ⋅ ⋅ ─── ⋅ ⋅ ─── ⋅ ⋅ ⋅ ⋅ ──\n"
+        f"ᴛʏᴘᴇ /squidcreate ᴛᴏ sᴛᴀʀᴛ ᴀ ɴᴇᴡ ɢᴀᴍᴇ"
+    )
+
+    # Try to send with profile photo
+    try:
+        async for photo in client.get_chat_photos(user_id, limit=1):
+            await message.reply_photo(
+                photo=photo.file_id,
+                caption=gold_message,
+                reply_to_message_id=message.id
+            )
+            return
+    except Exception:
+        pass
+
+    # Fallback to text
+    await message.reply_text(
+        gold_message,
+        reply_to_message_id=message.id
+    )
+
+# RANDOM CHARACTERS REWARD
+@app.on_message(filters.command("daily"))
+async def daily_reward(client: Client, message: Message):
+    user_id = message.from_user.id
+    user_data = await user_collection.find_one({"id": user_id})
+    
+    if not user_data:
+        await message.reply_text(convert_to_tiny("⚠️ ʏᴏᴜ ɴᴇᴇᴅ ᴛᴏ ʙᴇ ʀᴇɢɪsᴛᴇʀᴇᴅ ғɪʀsᴛ"))
+        return
+    
+    # Check last claim time
+    last_claim = user_data.get("last_daily_claim")
+    if last_claim and (datetime.now() - last_claim).total_seconds() < 86400:  # 24 hours
+        next_claim = last_claim + timedelta(days=1)
+        await message.reply_text(convert_to_tiny(f"⚠️ ʏᴏᴜ'ᴠᴇ ᴀʟʀᴇᴀᴅʏ ᴄʟᴀɪᴍᴇᴅ ʏᴏᴜʀ ᴅᴀɪʟʏ ʀᴇᴡᴀʀᴅ\n⏳ ɴᴇxᴛ ᴄʟᴀɪᴍ: {next_claim.strftime('%Y-%m-%d %H:%M:%S')}"))
+        return
+    
+    # Award random characters (1-5)
+    num_characters = random.randint(1, 5)
+    awarded_chars = []
+    
+    for _ in range(num_characters):
+        # Get a random character from the database
+        random_char = await collection.aggregate([{"$sample": {"size": 1}}]).to_list(1)
+        if random_char:
+            char_id = random_char[0]["id"]
+            await ac(user_id, char_id)
+            awarded_chars.append(random_char[0]["name"])
+    
+    # Award bonus gold
+    bonus_gold = random.randint(50, 500)
+    await user_collection.update_one(
+        {"id": user_id},
+        {"$inc": {"gold": bonus_gold}, "$set": {"last_daily_claim": datetime.now()}},
+        upsert=True
+    )
+    
+    # Prepare response
+    if awarded_chars:
+        chars_text = "\n".join(f"• {char}" for char in awarded_chars)
+        reward_text = (
+            f"🎁 **ᴅᴀɪʟʏ ʀᴇᴡᴀʀᴅ ᴄʟᴀɪᴍᴇᴅ!**\n\n"
+            f"💰 ʙᴏɴᴜs ɢᴏʟᴅ: {bonus_gold} ₲\n"
+            f"🎴 ɴᴇᴡ ᴄʜᴀʀᴀᴄᴛᴇʀs:\n{chars_text}\n\n"
+            f"⏳ ɴᴇxᴛ ʀᴇᴡᴀʀᴅ ɪɴ 24 ʜᴏᴜʀs"
+        )
+    else:
+        reward_text = (
+            f"🎁 **ᴅᴀɪʟʏ ʀᴇᴡᴀʀᴅ ᴄʟᴀɪᴍᴇᴅ!**\n\n"
+            f"💰 ʙᴏɴᴜs ɢᴏʟᴅ: {bonus_gold} ₲\n\n"
+            f"⏳ ɴᴇxᴛ ʀᴇᴡᴀʀᴅ ɪɴ 24 ʜᴏᴜʀs"
+        )
+    
+    await message.reply_text(convert_to_tiny(reward_text))

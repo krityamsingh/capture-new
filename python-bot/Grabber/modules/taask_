@@ -1,0 +1,347 @@
+import asyncio
+from datetime import datetime, timedelta
+from pyrogram import filters
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from . import user_collection, app
+from datetime import datetime
+
+# Task structure in user document:
+# {
+#   "tasks": {
+#     "daily_legendary": 0/2,
+#     "weekly_limited": 0/2,
+#     "daily_all_rarity": 0/10,
+#     "bio_updated": False,
+#     "support_messages": 0/150,
+#     "last_reset": datetime,
+#     "completed": False
+#   }
+# }
+
+SUPPORT_GROUP = "https://t.me/+a8cPyj54PhQyMTI1"
+BOT_USERNAME = "@Character_Seizer_Bot"
+OWNER_ID = "7861332030"
+
+async def reset_daily_tasks():
+    while True:
+        now = datetime.utcnow()
+        next_day = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        wait_seconds = (next_day - now).total_seconds()
+        await asyncio.sleep(wait_seconds)
+        
+        # Reset daily tasks for all users
+        await user_collection.update_many(
+            {},
+            {"$set": {
+                "tasks.daily_legendary": 0,
+                "tasks.daily_all_rarity": 0,
+                "tasks.last_reset": datetime.utcnow()
+            }}
+        )
+
+async def reset_weekly_tasks():
+    while True:
+        now = datetime.utcnow()
+        next_week = (now + timedelta(weeks=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        wait_seconds = (next_week - now).total_seconds()
+        await asyncio.sleep(wait_seconds)
+        
+        # Reset weekly tasks for all users
+        await user_collection.update_many(
+            {},
+            {"$set": {
+                "tasks.weekly_limited": 0
+            }}
+        )
+
+@app.on_message(filters.command("task"))
+async def task_command(client, message: Message):
+    user_id = message.from_user.id
+    user = await user_collection.find_one({"id": user_id})
+    
+    if not user:
+        await user_collection.insert_one({
+            "id": user_id,
+            "tasks": {
+                "daily_legendary": 0,
+                "weekly_limited": 0,
+                "daily_all_rarity": 0,
+                "bio_updated": False,
+                "support_messages": 0,
+                "last_reset": datetime.utcnow(),
+                "completed": False
+            }
+        })
+        user = await user_collection.find_one({"id": user_id})
+    
+    tasks = user.get("tasks", {})
+    
+    # Check if tasks were completed
+    if tasks.get("completed", False):
+        await message.reply_text("🎉 You've already completed all tasks and claimed your rewards!")
+        return
+    
+    # Prepare progress text
+    progress_text = (
+        "☀️ **Summer Event Tasks** ☀️\n\n"
+        f"▫️ **Daily Legendary Characters (2):** {tasks.get('daily_legendary', 0)}/2\n"
+        f"▫️ **Weekly Limited Edition Characters (2):** {tasks.get('weekly_limited', 0)}/2\n"
+        f"▫️ **Daily All Rarity Characters (10):** {tasks.get('daily_all_rarity', 0)}/10\n"
+        f"▫️ **Bio Updated with @Character_Seizer_Bot:** {'✅' if tasks.get('bio_updated', False) else '❌'}\n"
+        f"▫️ **Support Group Messages (150):** {tasks.get('support_messages', 0)}/150\n\n"
+        "✨ **Rewards:**\n"
+        "- 1 × ☀️ Summer[Su] character\n"
+        "- 2 × 🎐 Celestial characters\n"
+        "- 1,000,000 Tokens"
+    )
+    
+    # Check if all tasks are completed
+    all_tasks_done = (
+        tasks.get("daily_legendary", 0) >= 2 and
+        tasks.get("weekly_limited", 0) >= 2 and
+        tasks.get("daily_all_rarity", 0) >= 10 and
+        tasks.get("bio_updated", False) and
+        tasks.get("support_messages", 0) >= 150
+    )
+    
+    keyboard = []
+    if all_tasks_done:
+        keyboard.append([InlineKeyboardButton("🎁 Claim Rewards", callback_data="claim_rewards")])
+    else:
+        keyboard.append([InlineKeyboardButton("📌 How to Complete Tasks", callback_data="task_help")])
+        keyboard.append([InlineKeyboardButton("🔗 Support Group", url=SUPPORT_GROUP)])
+    
+    await message.reply_text(
+        progress_text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+@app.on_callback_query(filters.regex("^task_help$"))
+async def task_help_callback(client, callback_query):
+    help_text = (
+        "📌 **How to Complete Tasks:**\n\n"
+        "1. **Legendary Characters**: Seize 2 🟡 Legendary rarity characters in a day\n"
+        "2. **Limited Edition**: Seize 2 🔮 Limited Edition characters in a week\n"
+        "3. **All Rarity**: Seize 10 characters of any rarity in a day\n"
+        "4. **Bio Update**: Add @Character_Seizer_Bot to your Telegram bio\n"
+        "5. **Support Group**: Send 150 messages in our support group\n\n"
+        f"🔗 Support Group: {SUPPORT_GROUP}\n"
+        "⚠️ Note: Task progress resets daily/weekly as specified"
+    )
+    
+    await callback_query.message.edit_text(
+        help_text,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 Back", callback_data="back_to_tasks")]
+        ])
+    )
+    await callback_query.answer()
+
+@app.on_callback_query(filters.regex("^back_to_tasks$"))
+async def back_to_tasks_callback(client, callback_query):
+    user_id = callback_query.from_user.id
+    user = await user_collection.find_one({"id": user_id})
+    tasks = user.get("tasks", {})
+    
+    progress_text = (
+        "☀️ **Summer Event Tasks** ☀️\n\n"
+        f"▫️ **Daily Legendary Characters (2):** {tasks.get('daily_legendary', 0)}/2\n"
+        f"▫️ **Weekly Limited Edition Characters (2):** {tasks.get('weekly_limited', 0)}/2\n"
+        f"▫️ **Daily All Rarity Characters (10):** {tasks.get('daily_all_rarity', 0)}/10\n"
+        f"▫️ **Bio Updated with @Character_Seizer_Bot:** {'✅' if tasks.get('bio_updated', False) else '❌'}\n"
+        f"▫️ **Support Group Messages (150):** {tasks.get('support_messages', 0)}/150\n\n"
+        "✨ **Rewards:**\n"
+        "- 1 × ☀️ Summer[Su] character\n"
+        "- 2 × 🎐 Celestial characters\n"
+        "- 1,000,000 Tokens"
+    )
+    
+    all_tasks_done = (
+        tasks.get("daily_legendary", 0) >= 2 and
+        tasks.get("weekly_limited", 0) >= 2 and
+        tasks.get("daily_all_rarity", 0) >= 10 and
+        tasks.get("bio_updated", False) and
+        tasks.get("support_messages", 0) >= 150
+    )
+    
+    keyboard = []
+    if all_tasks_done:
+        keyboard.append([InlineKeyboardButton("🎁 Claim Rewards", callback_data="claim_rewards")])
+    else:
+        keyboard.append([InlineKeyboardButton("📌 How to Complete Tasks", callback_data="task_help")])
+        keyboard.append([InlineKeyboardButton("🔗 Support Group", url=SUPPORT_GROUP)])
+    
+    await callback_query.message.edit_text(
+        progress_text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    await callback_query.answer()
+
+@app.on_callback_query(filters.regex("^claim_rewards$"))
+async def claim_rewards_callback(client, callback_query):
+    user_id = callback_query.from_user.id
+    user = await user_collection.find_one({"id": user_id})
+    tasks = user.get("tasks", {})
+    
+    # Verify all tasks are completed
+    all_tasks_done = (
+        tasks.get("daily_legendary", 0) >= 2 and
+        tasks.get("weekly_limited", 0) >= 2 and
+        tasks.get("daily_all_rarity", 0) >= 10 and
+        tasks.get("bio_updated", False) and
+        tasks.get("support_messages", 0) >= 150
+    )
+    
+    if not all_tasks_done:
+        await callback_query.answer("You haven't completed all tasks yet!", show_alert=True)
+        return
+    
+    if tasks.get("completed", False):
+        await callback_query.answer("You've already claimed your rewards!", show_alert=True)
+        return
+    
+    # Add rewards to user's account
+    summer_char = {
+        "name": "Summer Special",
+        "rarity": "☀️ Summer[Su]",
+        "anime": "Event Exclusive",
+        "img_url": "https://example.com/summer.jpg"
+    }
+    
+    celestial_chars = [{
+        "name": "Celestial Being",
+        "rarity": "🎐 Celestial",
+        "anime": "Event Exclusive",
+        "img_url": "https://example.com/celestial.jpg"
+    } for _ in range(2)]
+    
+    await user_collection.update_one(
+        {"id": user_id},
+        {"$set": {"tasks.completed": True},
+         "$push": {"characters": {"$each": [summer_char] + celestial_chars}},
+         "$inc": {"tokens": 1000000}}
+    )
+    
+    # Send reward message
+    reward_text = (
+        "🎉 **Congratulations!** 🎉\n\n"
+        "You've completed all Summer Event Tasks!\n\n"
+        "✨ **Rewards Claimed:**\n"
+        "- 1 × ☀️ Summer[Su] character\n"
+        "- 2 × 🎐 Celestial characters\n"
+        "- 1,000,000 Tokens\n\n"
+        "Check your /harem to see your new characters!"
+    )
+    
+    await callback_query.message.edit_text(reward_text)
+    await callback_query.answer()
+
+@app.on_message(filters.command("completetask") & filters.user(OWNER_ID))
+async def complete_task_admin(client, message: Message):
+    if not message.reply_to_message:
+        await message.reply_text("Please reply to a user's message to complete their tasks.")
+        return
+    
+    user_id = message.reply_to_message.from_user.id
+    user = await user_collection.find_one({"id": user_id})
+    
+    if not user:
+        await message.reply_text("User not found in database!")
+        return
+    
+    if user.get("tasks", {}).get("completed", False):
+        await message.reply_text("This user has already completed their tasks!")
+        return
+    
+    # Mark all tasks as completed
+    await user_collection.update_one(
+        {"id": user_id},
+        {"$set": {
+            "tasks.daily_legendary": 2,
+            "tasks.weekly_limited": 2,
+            "tasks.daily_all_rarity": 10,
+            "tasks.bio_updated": True,
+            "tasks.support_messages": 150,
+            "tasks.completed": True
+        }}
+    )
+    
+    # Add rewards
+    summer_char = {
+        "name": "Summer Special",
+        "rarity": "☀️ Summer[Su]",
+        "anime": "Event Exclusive",
+        "img_url": "https://example.com/summer.jpg"
+    }
+    
+    celestial_chars = [{
+        "name": "Celestial Being",
+        "rarity": "🎐 Celestial",
+        "anime": "Event Exclusive",
+        "img_url": "https://example.com/celestial.jpg"
+    } for _ in range(2)]
+    
+    await user_collection.update_one(
+        {"id": user_id},
+        {"$push": {"characters": {"$each": [summer_char] + celestial_chars}},
+         "$inc": {"tokens": 1000000}}
+    )
+    
+    await message.reply_text(f"Successfully completed tasks and added rewards for user {user_id}!")
+    try:
+        await client.send_message(
+            user_id,
+            "🎉 An admin has completed all your Summer Event Tasks!\n"
+            "Check your /harem to see your new ☀️ Summer[Su] and 🎐 Celestial characters!\n"
+            "You also received 1,000,000 Tokens!"
+        )
+    except Exception as e:
+        print(f"Couldn't notify user: {e}")
+
+# Start task reset loops when bot starts
+@app.on_startup()
+async def startup():
+    asyncio.create_task(reset_daily_tasks())
+    asyncio.create_task(reset_weekly_tasks())
+
+# Function to update task progress when characters are seized
+async def update_tasks_on_seize(user_id, character):
+    rarity = character.get("rarity", "")
+    
+    updates = {
+        "$inc": {
+            "tasks.daily_all_rarity": 1
+        }
+    }
+    
+    if "🟡 Legendary" in rarity:
+        updates["$inc"]["tasks.daily_legendary"] = 1
+    elif "🔮 Limited Edition" in rarity:
+        updates["$inc"]["tasks.weekly_limited"] = 1
+    
+    await user_collection.update_one(
+        {"id": user_id},
+        updates
+    )
+
+# Function to check bio updates
+async def check_bio_update(user_id):
+    try:
+        user = await app.get_users(user_id)
+        if BOT_USERNAME.lower() in (user.bio or "").lower():
+            await user_collection.update_one(
+                {"id": user_id},
+                {"$set": {"tasks.bio_updated": True}}
+            )
+            return True
+    except Exception as e:
+        print(f"Error checking bio: {e}")
+    return False
+
+# Function to update support group messages
+async def update_support_messages(user_id, chat_id):
+    if str(chat_id) == SUPPORT_GROUP.split('/')[-1]:
+        await user_collection.update_one(
+            {"id": user_id},
+            {"$inc": {"tasks.support_messages": 1}}
+        )

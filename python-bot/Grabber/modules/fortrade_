@@ -1,0 +1,421 @@
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from Grabber import user_collection, app
+from .block import block_dec_ptb
+import random
+import asyncio
+
+# Trade dictionaries
+pending_global_trades = {}
+user_trade_requests = {}
+
+async def find_character_owners(character_id):
+    """Find all users who own a specific character"""
+    owners = []
+    async for user in user_collection.find({'characters.id': int(character_id)}):
+        for char in user['characters']:
+            if str(char.get('id')) == str(character_id):
+                owners.append({
+                    'user_id': user['id'],
+                    'character': char
+                })
+                break
+    return owners
+
+@block_dec_ptb
+@app.on_message(filters.command("fortrade"))
+async def global_trade(client: Client, message: Message):
+    try:
+        user_id = message.from_user.id
+        user = await user_collection.find_one({'id': user_id})
+        
+        if not user or 'characters' not in user:
+            await message.reply_text("**You don't have any characters to trade!**")
+            return
+        
+        if len(message.command) < 3:
+            await message.reply_text("**Format:**\n`/fortrade [your_character_id] [wanted_character_id]`")
+            return
+        
+        your_char_id = message.command[1]
+        wanted_char_id = message.command[2]
+        
+        # Validate character IDs
+        if not your_char_id.isdigit() or not wanted_char_id.isdigit():
+            await message.reply_text("**Character IDs must be numbers!**")
+            return
+        
+        # Find user's character
+        your_char = None
+        for char in user['characters']:
+            if str(char.get('id')) == your_char_id:
+                your_char = char
+                break
+                
+        if not your_char:
+            await message.reply_text("**You don't own this character!**")
+            return
+        
+        # Search database for wanted character owners
+        owners = await find_character_owners(wanted_char_id)
+        
+        if not owners:
+            await message.reply_text("**This character hasn't been collected by anyone yet!**")
+            return
+        
+        # Filter out yourself from potential owners
+        owners = [owner for owner in owners if owner['user_id'] != user_id]
+        
+        if not owners:
+            await message.reply_text("**You already own this character!**")
+            return
+        
+        # Select a random owner (you could implement preference logic here)
+        selected_owner = random.choice(owners)
+        
+        # Prepare trade info
+        trade_id = f"global_{user_id}_{selected_owner['user_id']}_{message.id}"
+        pending_global_trades[trade_id] = {
+            'sender_id': user_id,
+            'receiver_id': selected_owner['user_id'],
+            'sender_char': your_char,
+            'receiver_char': selected_owner['character'],
+            'message_id': message.id
+        }
+        
+        # Store user's trade request
+        if user_id not in user_trade_requests:
+            user_trade_requests[user_id] = []
+        user_trade_requests[user_id].append(trade_id)
+        
+        # Get user names
+        sender = await client.get_users(user_id)
+        receiver = await client.get_users(selected_owner['user_id'])
+        
+        # Prepare media (use sender's character media)
+        media = your_char.get('video_url') or your_char.get('img_url')
+        media_type = 'video' if 'video_url' in your_char else 'photo' if 'img_url' in your_char else None
+        
+        # Prepare trade message
+        trade_msg = f"""
+**🌍 GLOBAL TRADE REQUEST**
+
+**• From:** [{sender.first_name}](tg://user?id={sender.id})
+**• To:** [{receiver.first_name}](tg://user?id={receiver.id})
+
+**🔄 Trade Offer:**
+{sender.first_name}'s Character:
+➥ ID: `{your_char.get('id', 'N/A')}`
+➥ Name: {your_char.get('name', 'N/A')}
+➥ Rarity: {your_char.get('rarity', 'N/A')}
+
+For {receiver.first_name}'s Character:
+➥ ID: `{selected_owner['character'].get('id', 'N/A')}`
+➥ Name: {selected_owner['character'].get('name', 'N/A')}
+➥ Rarity: {selected_owner['character'].get('rarity', 'N/A')}
+"""
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📤 Send Trade Request", callback_data=f"gsend_{trade_id}"),
+             InlineKeyboardButton("❌ Cancel", callback_data=f"gcancel_{trade_id}")]
+        ])
+        
+        if media:
+            if media_type == 'video':
+                await client.send_video(
+                    chat_id=message.chat.id,
+                    video=media,
+                    caption=trade_msg,
+                    reply_markup=keyboard
+                )
+            else:
+                await client.send_photo(
+                    chat_id=message.chat.id,
+                    photo=media,
+                    caption=trade_msg,
+                    reply_markup=keyboard
+                )
+        else:
+            await message.reply_text(
+                trade_msg,
+                reply_markup=keyboard
+            )
+            
+    except Exception as e:
+        print(f"Error in fortrade command: {e}")
+        await message.reply_text("**An error occurred while processing your trade request!**")
+
+@app.on_callback_query(filters.regex(r"^gsend_"))
+async def send_global_trade(client, callback_query):
+    try:
+        trade_id = callback_query.data.split("_", 1)[1]
+        
+        if trade_id not in pending_global_trades:
+            await callback_query.answer("Trade expired or not found!", show_alert=True)
+            return
+            
+        trade_data = pending_global_trades[trade_id]
+        
+        if callback_query.from_user.id != trade_data['sender_id']:
+            await callback_query.answer("This trade request isn't for you!", show_alert=True)
+            return
+        
+        # Get users
+        sender = await client.get_users(trade_data['sender_id'])
+        receiver = await client.get_users(trade_data['receiver_id'])
+        
+        # Prepare media (use sender's character media)
+        media = trade_data['sender_char'].get('video_url') or trade_data['sender_char'].get('img_url')
+        media_type = 'video' if 'video_url' in trade_data['sender_char'] else 'photo' if 'img_url' in trade_data['sender_char'] else None
+        
+        # Prepare DM message
+        dm_msg = f"""
+**📨 TRADE REQUEST RECEIVED**
+
+**• From:** [{sender.first_name}](tg://user?id={sender.id})
+**• Wants Your:** {trade_data['receiver_char'].get('name', 'Unknown')}
+
+**🔄 Trade Offer:**
+{sender.first_name}'s Character:
+➥ ID: `{trade_data['sender_char'].get('id', 'N/A')}`
+➥ Name: {trade_data['sender_char'].get('name', 'N/A')}
+➥ Rarity: {trade_data['sender_char'].get('rarity', 'N/A')}
+
+For Your Character:
+➥ ID: `{trade_data['receiver_char'].get('id', 'N/A')}`
+➥ Name: {trade_data['receiver_char'].get('name', 'N/A')}
+➥ Rarity: {trade_data['receiver_char'].get('rarity', 'N/A')}
+"""
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Accept Trade", callback_data=f"gaccept_{trade_id}"),
+             InlineKeyboardButton("❌ Reject", callback_data=f"greject_{trade_id}")]
+        ])
+        
+        try:
+            if media:
+                if media_type == 'video':
+                    await client.send_video(
+                        chat_id=receiver.id,
+                        video=media,
+                        caption=dm_msg,
+                        reply_markup=keyboard
+                    )
+                else:
+                    await client.send_photo(
+                        chat_id=receiver.id,
+                        photo=media,
+                        caption=dm_msg,
+                        reply_markup=keyboard
+                    )
+            else:
+                await client.send_message(
+                    chat_id=receiver.id,
+                    text=dm_msg,
+                    reply_markup=keyboard
+                )
+            
+            # Update callback query message
+            await callback_query.message.edit_text("**📤 Trade request sent successfully!**")
+            await callback_query.answer("Request sent to the owner!", show_alert=True)
+            
+        except Exception as e:
+            print(f"Error sending DM: {e}")
+            await callback_query.answer("Couldn't send DM to the user. They may have blocked the bot.", show_alert=True)
+            
+    except Exception as e:
+        print(f"Error in gsend: {e}")
+        await callback_query.answer("An error occurred!", show_alert=True)
+
+@app.on_callback_query(filters.regex(r"^gaccept_"))
+async def accept_global_trade(client, callback_query):
+    try:
+        trade_id = callback_query.data.split("_", 1)[1]
+        
+        if trade_id not in pending_global_trades:
+            await callback_query.answer("Trade expired or not found!", show_alert=True)
+            return
+            
+        trade_data = pending_global_trades[trade_id]
+        
+        if callback_query.from_user.id != trade_data['receiver_id']:
+            await callback_query.answer("This trade request isn't for you!", show_alert=True)
+            return
+        
+        # Get both users from database
+        sender = await user_collection.find_one({'id': trade_data['sender_id']})
+        receiver = await user_collection.find_one({'id': trade_data['receiver_id']})
+        
+        if not sender or not receiver:
+            await callback_query.answer("One or both users not found in database!", show_alert=True)
+            return
+        
+        # Verify both still have the characters
+        sender_has_char = any(str(c.get('id')) == str(trade_data['sender_char'].get('id')) for c in sender['characters'])
+        receiver_has_char = any(str(c.get('id')) == str(trade_data['receiver_char'].get('id')) for c in receiver['characters'])
+        
+        if not sender_has_char or not receiver_has_char:
+            await callback_query.answer("One user no longer has the character!", show_alert=True)
+            return
+        
+        # Perform the trade
+        # Remove characters
+        sender['characters'] = [c for c in sender['characters'] if str(c.get('id')) != str(trade_data['sender_char'].get('id'))]
+        receiver['characters'] = [c for c in receiver['characters'] if str(c.get('id')) != str(trade_data['receiver_char'].get('id'))]
+        
+        # Add traded characters
+        sender['characters'].append(trade_data['receiver_char'])
+        receiver['characters'].append(trade_data['sender_char'])
+        
+        # Update database
+        await user_collection.update_one({'id': trade_data['sender_id']}, {'$set': {'characters': sender['characters']}})
+        await user_collection.update_one({'id': trade_data['receiver_id']}, {'$set': {'characters': receiver['characters']}})
+        
+        # Clean up
+        del pending_global_trades[trade_id]
+        if trade_data['sender_id'] in user_trade_requests and trade_id in user_trade_requests[trade_data['sender_id']]:
+            user_trade_requests[trade_data['sender_id']].remove(trade_id)
+        
+        # Get user details for notification
+        sender_user = await client.get_users(trade_data['sender_id'])
+        receiver_user = callback_query.from_user
+        
+        # Prepare success message
+        success_msg = f"""
+**🎉 TRADE COMPLETED!**
+
+**• {sender_user.first_name}** received: {trade_data['receiver_char'].get('name', 'Unknown')}
+**• {receiver_user.first_name}** received: {trade_data['sender_char'].get('name', 'Unknown')}
+
+**Happy trading!** 🎁
+"""
+        # Notify both users
+        try:
+            await callback_query.message.edit_text(success_msg)
+            await client.send_message(
+                chat_id=trade_data['sender_id'],
+                text=success_msg
+            )
+            await callback_query.answer("Trade completed successfully!", show_alert=True)
+        except Exception as e:
+            print(f"Error sending notifications: {e}")
+            
+    except Exception as e:
+        print(f"Error in gaccept: {e}")
+        await callback_query.answer("An error occurred!", show_alert=True)
+
+@app.on_callback_query(filters.regex(r"^greject_"))
+async def reject_global_trade(client, callback_query):
+    try:
+        trade_id = callback_query.data.split("_", 1)[1]
+        
+        if trade_id not in pending_global_trades:
+            await callback_query.answer("Trade expired or not found!", show_alert=True)
+            return
+            
+        trade_data = pending_global_trades[trade_id]
+        
+        if callback_query.from_user.id != trade_data['receiver_id']:
+            await callback_query.answer("This trade request isn't for you!", show_alert=True)
+            return
+        
+        # Clean up
+        del pending_global_trades[trade_id]
+        if trade_data['sender_id'] in user_trade_requests and trade_id in user_trade_requests[trade_data['sender_id']]:
+            user_trade_requests[trade_data['sender_id']].remove(trade_id)
+        
+        # Notify sender
+        try:
+            sender = await client.get_users(trade_data['sender_id'])
+            await client.send_message(
+                chat_id=trade_data['sender_id'],
+                text=f"**❌ Your trade request for {trade_data['receiver_char'].get('name', 'Unknown')} was rejected by the owner.**"
+            )
+        except:
+            pass
+        
+        await callback_query.message.edit_text("**❌ Trade rejected.**")
+        await callback_query.answer("Trade rejected!", show_alert=True)
+        
+    except Exception as e:
+        print(f"Error in greject: {e}")
+        await callback_query.answer("An error occurred!", show_alert=True)
+
+@app.on_callback_query(filters.regex(r"^gcancel_"))
+async def cancel_global_trade(client, callback_query):
+    try:
+        trade_id = callback_query.data.split("_", 1)[1]
+        
+        if trade_id not in pending_global_trades:
+            await callback_query.answer("Trade expired or not found!", show_alert=True)
+            return
+            
+        trade_data = pending_global_trades[trade_id]
+        
+        if callback_query.from_user.id != trade_data['sender_id']:
+            await callback_query.answer("This trade request isn't for you!", show_alert=True)
+            return
+        
+        # Clean up
+        del pending_global_trades[trade_id]
+        if trade_data['sender_id'] in user_trade_requests and trade_id in user_trade_requests[trade_data['sender_id']]:
+            user_trade_requests[trade_data['sender_id']].remove(trade_id)
+        
+        await callback_query.message.edit_text("**❌ Trade request cancelled.**")
+        await callback_query.answer("Trade cancelled!", show_alert=True)
+        
+    except Exception as e:
+        print(f"Error in gcancel: {e}")
+        await callback_query.answer("An error occurred!", show_alert=True)
+
+@app.on_message(filters.command("mytrades"))
+async def view_my_trades(client, message):
+    try:
+        user_id = message.from_user.id
+        
+        if user_id not in user_trade_requests or not user_trade_requests[user_id]:
+            await message.reply_text("**You don't have any active trade requests!**")
+            return
+        
+        active_trades = []
+        for trade_id in user_trade_requests[user_id]:
+            if trade_id in pending_global_trades:
+                trade_data = pending_global_trades[trade_id]
+                char_name = trade_data['receiver_char'].get('name', 'Unknown')
+                owner = await client.get_users(trade_data['receiver_id'])
+                active_trades.append(f"• {char_name} (Owner: {owner.first_name}) - `/cancel_trade {trade_id}`")
+        
+        if not active_trades:
+            await message.reply_text("**You don't have any active trade requests!**")
+            return
+        
+        await message.reply_text(
+            "**📤 Your Active Trade Requests:**\n\n" + "\n".join(active_trades) +
+            "\n\nUse `/cancel_trade [trade_id]` to cancel a specific trade."
+        )
+        
+    except Exception as e:
+        print(f"Error in mytrades: {e}")
+        await message.reply_text("**An error occurred!**")
+
+@app.on_message(filters.command("cancel_trade"))
+async def cancel_specific_trade(client, message):
+    try:
+        if len(message.command) < 2:
+            await message.reply_text("**Format:** `/cancel_trade [trade_id]`")
+            return
+            
+        trade_id = message.command[1]
+        user_id = message.from_user.id
+        
+        if user_id not in user_trade_requests or trade_id not in user_trade_requests[user_id]:
+            await message.reply_text("**Trade not found in your active requests!**")
+            return
+            
+        if trade_id in pending_global_trades:
+            del pending_global_trades[trade_id]
+        
+        user_trade_requests[user_id].remove(trade_id)
+        await message.reply_text("**✅ Trade request cancelled successfully!**")
+        
+    except Exception as e:
+        print(f"Error in cancel_trade: {e}")
+        await message.reply_text("**An error occurred!**")

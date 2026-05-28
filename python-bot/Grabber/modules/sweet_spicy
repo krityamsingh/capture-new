@@ -1,0 +1,1045 @@
+"""
+Grabber/modules/sweet_spicy.py
+──────────────────────────────
+🍬🌶️ Sweet or Spicy — Ultimate Truth & Dare Party Game
+
+Features:
+  ✅ Group multiplayer with join lobby
+  ✅ Random anime character drops as rewards (from DB)
+  ✅ Coin rewards per challenge (with streak bonuses!)
+  ✅ Lucky Round 🎰 — double coins + guaranteed character drop
+  ✅ 3 difficulty tiers: Easy / Medium / Hard
+  ✅ Jackpot for MVP at game end
+  ✅ Participation coins for all players
+  ✅ Full scoreboard with coin totals + streak tracking
+  ✅ Anti-cheat: only active player can press buttons
+
+Commands:
+  /sweetspicy  — Start a new game (lobby open 60s)
+  /endgame     — Force-end game (starter or admin only)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import random
+from dataclasses import dataclass, field
+from typing import Optional
+
+from pyrogram import filters
+from pyrogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
+from pyrogram.errors import MessageNotModified
+
+# ── Import app ────────────────────────────────────────────────────────────────
+try:
+    from Grabber import app
+except ImportError:
+    try:
+        from Grabber.main import app
+    except ImportError as e:
+        raise RuntimeError("Cannot find Pyrogram 'app'. Check your import path.") from e
+
+# ── Import DB collections (auto-detect module) ────────────────────────────────
+_user_collection = None
+_char_collection  = None
+
+for _mod_path in ["Grabber.database", "Grabber.db", "Grabber.mongo", "Grabber"]:
+    try:
+        import importlib as _il
+        _m = _il.import_module(_mod_path)
+        if hasattr(_m, "user_collection") and _user_collection is None:
+            _user_collection = _m.user_collection
+        if hasattr(_m, "collection") and _char_collection is None:
+            _char_collection = _m.collection
+        if _user_collection is not None and _char_collection is not None:
+            break
+    except ImportError:
+        continue
+
+if _user_collection is None:
+    raise RuntimeError("Could not find 'user_collection'. Add your DB module path to sweet_spicy.py.")
+if _char_collection is None:
+    raise RuntimeError("Could not find 'collection' (anime_characters). Add your DB module path to sweet_spicy.py.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CONFIG  (tweak freely)
+# ══════════════════════════════════════════════════════════════════════════════
+LOBBY_WAIT        = 60    # seconds lobby stays open
+ROUNDS_DEFAULT    = 3     # turns per player
+COIN_EASY         = 50
+COIN_MEDIUM       = 100
+COIN_HARD         = 200
+COIN_SKIP_PENALTY = 10    # deducted per skip
+STREAK_BONUS      = 50    # extra coins per streak level
+LUCKY_ROUND_EVERY = 3     # every Nth round is a Lucky Round
+LUCKY_COIN_MULT   = 2     # coin multiplier on lucky rounds
+WINNER_BONUS      = 500   # extra coins for MVP
+PARTICIPATION     = 30    # coins everyone gets for playing
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  QUESTIONS BANK  (Easy / Medium / Hard per tier)
+# ══════════════════════════════════════════════════════════════════════════════
+QUESTIONS = {
+    "sweet": {
+        "truth": {
+            "easy": [
+                "What's your all-time favourite comfort food? 🍜",
+                "What song instantly puts you in a good mood? 🎵",
+                "What's a childish thing you still secretly enjoy? 🍭",
+                "What's the nicest compliment you've ever received? 🥰",
+                "What does your dream home look like? 🏡",
+                "What's your love language? 💕",
+                "What's something small that makes you genuinely happy? 😊",
+            ],
+            "medium": [
+                "What's your most embarrassing childhood memory? 😅",
+                "Who was your first ever crush? 💘",
+                "What's the most thoughtful gift you've ever given? 🎁",
+                "What's the most romantic thing you've ever done? 🌹",
+                "What's the sweetest thing someone has ever done for you? 🌸",
+                "What movie always makes you cry, and why? 🥺",
+                "What's a secret talent nobody in this chat knows about? ✨",
+            ],
+            "hard": [
+                "If you could relive one day of your life, which would it be and why? 🌟",
+                "What's something you're genuinely proud of but rarely talk about? 💪",
+                "Describe the moment you felt most loved in your entire life 💞",
+                "What's a fear you've never told anyone? 😶",
+                "What's the biggest lesson a heartbreak taught you? 💔",
+            ],
+        },
+        "dare": {
+            "easy": [
+                "Compliment every player in this chat right now 💕",
+                "Share the last meme you saved 😂",
+                "List 5 things you're genuinely grateful for right now 🙏",
+                "Say something kind about yourself — no downplaying! ✨",
+                "Share your most-played song this week 🎧",
+            ],
+            "medium": [
+                "Send a voice message singing a lullaby right now 🎶",
+                "Write a cheesy pickup line for the last person who messaged in this chat 😏",
+                "Hum a song in a voice note and let others guess it 🎵",
+                "Do a dramatic reading of the last text you sent 📱",
+                "Describe each player using only a food item 🍓",
+                "Send your most embarrassing selfie 🤳",
+            ],
+            "hard": [
+                "Write a short poem about the person who joined the game after you 📝",
+                "Send a voice note doing your best movie character impression 🎬",
+                "Share the last photo in your camera roll — no deleting first! 📸",
+                "Confess your most embarrassing habit to the whole group 🫣",
+                "Let someone in this chat rename your Telegram username for 10 minutes 😂",
+            ],
+        },
+    },
+    "spicy": {
+        "truth": {
+            "easy": [
+                "Have you ever pretended to be sick to avoid something? 🤒",
+                "Have you ever accidentally liked an old post while stalking someone? 😂",
+                "What's a white lie you told recently? 🤥",
+                "What's the most embarrassing thing you've googled? 🔍",
+                "Have you ever lied about your age? 😏",
+            ],
+            "medium": [
+                "What's the most embarrassing thing that happened to you on a date? 😳",
+                "Have you ever had a crush on a friend's partner? 👀",
+                "What's the most awkward situation you've been caught in? 😬",
+                "Have you ever stood someone up? What happened? 🏃",
+                "Have you ever ghosted someone? Tell the full story 👻",
+                "What's a rumor about yourself that's actually true? 😏",
+                "Have you ever sent a message to the completely wrong person? 😱",
+            ],
+            "hard": [
+                "What's something you did that you swore you'd never tell anyone? 🤫",
+                "What's the most dramatic thing you've done to get someone's attention? 🎭",
+                "What's your most cringe-worthy past phase that you'd die if people found out? 💀",
+                "Have you ever said 'I love you' and not really meant it? 😶",
+                "What's the boldest thing you've done for someone who didn't deserve it? 😤",
+            ],
+        },
+        "dare": {
+            "easy": [
+                "Text someone you haven't talked to in over a year right now 📲",
+                "Send a voice note doing your most convincing flirty voice 😉",
+                "Say something bold you've been too scared to say in this chat 💬",
+                "Share the most recent embarrassing photo you have saved 😅",
+            ],
+            "medium": [
+                "Let someone in this game read your last 5 received texts 📱",
+                "Confess something you've been holding back in this chat 😤",
+                "Send a voice note impersonating someone in this chat 🎭",
+                "Share the most embarrassing thing in your search history 🔍",
+                "Tag someone and write your brutally honest first impression of them 👁️",
+            ],
+            "hard": [
+                "Call someone (anyone) and pretend to be a pizza delivery service 🍕",
+                "Let the group pick your profile picture for 1 hour 🖼️",
+                "Let someone in this chat post one story from your account 📢",
+                "Send a dramatic 'breakup text' to your best contact, then explain it's a dare 💔",
+                "Do a live 30-second standup roast about yourself in a voice note 🎤",
+                "Let the group rename you in this chat for the rest of the game 😂",
+            ],
+        },
+    },
+}
+
+DIFFICULTY_META = {
+    "easy":   {"label": "Easy 🟢",    "coins": COIN_EASY,   "emoji": "🟢"},
+    "medium": {"label": "Medium 🟡",  "coins": COIN_MEDIUM, "emoji": "🟡"},
+    "hard":   {"label": "Hard 🔴",    "coins": COIN_HARD,   "emoji": "🔴"},
+}
+
+REACTIONS = {
+    "sweet": [
+        "💕 Adorable! You're too cute for this game~",
+        "🍬 Sweetness overload! Someone call a dentist!",
+        "🥰 Awwww stop it, you're too wholesome!",
+        "✨ Pure angel behaviour right there!",
+        "🌸 The sweetest soul in this group — confirmed.",
+    ],
+    "spicy": [
+        "🌶️ SPICY! The group has been shook!",
+        "🔥 Oh we are NOT okay after that! 💀",
+        "😏 Bold move. Respect.",
+        "🤭 This group just levelled up in chaos!",
+        "💀 The audacity... we love it!",
+    ],
+}
+
+LUCKY_TAUNTS = [
+    "🎰 **LUCKY ROUND!** Coins are DOUBLED and a character drop is guaranteed!",
+    "⚡ **WILD ROUND!** Everything is worth double tonight!",
+    "🌟 **GOLDEN ROUND!** The stars align... coins flow freely!",
+]
+
+SKIP_TAUNTS = [
+    "😂 Scared? Really?",
+    "👀 Oh they ran from that one!",
+    "🐔 Bawk bawk! New question incoming~",
+    "😅 That question hit different huh?",
+]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  STATE
+# ══════════════════════════════════════════════════════════════════════════════
+@dataclass
+class Player:
+    user_id:      int
+    name:         str
+    sweet_score:  int = 0
+    spicy_score:  int = 0
+    skips:        int = 0
+    coins_earned: int = 0
+    streak:       int = 0
+    chars_won:    int = 0
+
+    @property
+    def total(self) -> int:
+        return self.sweet_score + self.spicy_score
+
+
+@dataclass
+class GameSession:
+    chat_id:             int
+    starter_id:          int
+    players:             list[Player] = field(default_factory=list)
+    phase:               str = "joining"
+    current_player_idx:  int = 0
+    round_num:           int = 1
+    total_rounds:        int = ROUNDS_DEFAULT
+    last_category:       Optional[str] = None
+    last_type:           Optional[str] = None
+    last_difficulty:     Optional[str] = None
+    is_lucky_round:      bool = False
+    used: dict = field(default_factory=lambda: {
+        "sweet": {
+            "truth": {"easy": set(), "medium": set(), "hard": set()},
+            "dare":  {"easy": set(), "medium": set(), "hard": set()},
+        },
+        "spicy": {
+            "truth": {"easy": set(), "medium": set(), "hard": set()},
+            "dare":  {"easy": set(), "medium": set(), "hard": set()},
+        },
+    })
+    join_message_id:     Optional[int] = None
+    question_message_id: Optional[int] = None
+    vote: Optional[dict] = None
+
+    @property
+    def current_player(self) -> Optional[Player]:
+        if self.players:
+            return self.players[self.current_player_idx % len(self.players)]
+        return None
+
+    def get_question(self, cat: str, q_type: str, difficulty: str) -> tuple[int, str]:
+        pool     = QUESTIONS[cat][q_type][difficulty]
+        used_set = self.used[cat][q_type][difficulty]
+        avail    = [i for i in range(len(pool)) if i not in used_set]
+        if not avail:
+            used_set.clear()
+            avail = list(range(len(pool)))
+        idx = random.choice(avail)
+        used_set.add(idx)
+        return idx, pool[idx]
+
+    def next_turn(self) -> bool:
+        self.current_player_idx += 1
+        if self.current_player_idx >= len(self.players):
+            self.current_player_idx = 0
+            self.round_num += 1
+        if self.round_num > self.total_rounds:
+            self.phase = "ended"
+            return False
+        self.is_lucky_round = (self.round_num % LUCKY_ROUND_EVERY == 0)
+        return True
+
+
+_games: dict[int, GameSession] = {}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  DATABASE
+# ══════════════════════════════════════════════════════════════════════════════
+async def _get_random_character() -> Optional[dict]:
+    try:
+        count = await _char_collection.count_documents({})
+        if count == 0:
+            return None
+        skip = random.randint(0, max(0, count - 1))
+        async for doc in _char_collection.find({}).skip(skip).limit(1):
+            return doc
+    except Exception:
+        return None
+
+async def _award_coins(user_id: int, amount: int) -> int:
+    """Add/deduct coins. Returns new balance."""
+    try:
+        uid = int(user_id)
+        # First find the document to detect which field name is used
+        doc = (
+            await _user_collection.find_one({"id": uid})
+            or await _user_collection.find_one({"user_id": uid})
+        )
+        if doc is None:
+            # User not in collection yet — nothing to update
+            return 0
+
+        field_key = "id" if "id" in doc else "user_id"
+
+        # Ensure balance field exists, then increment
+        result = await _user_collection.find_one_and_update(
+            {field_key: uid},
+            {
+                "$inc": {"balance": amount},
+                "$setOnInsert": {field_key: uid},
+            },
+            return_document=True,   # return AFTER update
+            upsert=False,
+        )
+        if result is not None:
+            return int(result.get("balance", 0))
+    except Exception:
+        pass
+    return 0
+
+async def _add_char_to_user(user_id: int, char_id: str) -> bool:
+    try:
+        uid = int(user_id)
+        for field_key in ("id", "user_id"):
+            result = await _user_collection.find_one_and_update(
+                {field_key: uid},
+                {"$addToSet": {"characters": char_id}},
+                return_document=True,
+            )
+            if result:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  UI
+# ══════════════════════════════════════════════════════════════════════════════
+def _mention(p: Player) -> str:
+    return f"[{p.name}](tg://user?id={p.user_id})"
+
+def _scoreboard(session: GameSession) -> str:
+    if not session.players:
+        return ""
+    lines = ["📊 **Live Scoreboard:**"]
+    for i, p in enumerate(sorted(session.players, key=lambda x: x.coins_earned, reverse=True), 1):
+        medal  = ["🥇", "🥈", "🥉"][i - 1] if i <= 3 else f"{i}."
+        streak = f" 🔥×{p.streak}" if p.streak >= 2 else ""
+        stars  = "⭐" * p.chars_won if p.chars_won else ""
+        lines.append(f"{medal} {_mention(p)} — ✅`{p.total}` 🪙`{p.coins_earned:,}`{streak} {stars}")
+    return "\n".join(lines)
+
+def _join_kb(chat_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("Join 💕",  callback_data=f"ss_join:{chat_id}"),
+        InlineKeyboardButton("Start ▶️", callback_data=f"ss_forcestart:{chat_id}"),
+    ]])
+
+def _category_kb(chat_id: int, lucky: bool = False) -> InlineKeyboardMarkup:
+    sl = "🍬 Sweet" + (" ×2!" if lucky else "")
+    sp = "🌶️ Spicy" + (" ×2!" if lucky else "")
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(sl, callback_data=f"ss_cat:sweet:{chat_id}"),
+        InlineKeyboardButton(sp, callback_data=f"ss_cat:spicy:{chat_id}"),
+    ]])
+
+def _difficulty_kb(chat_id: int, cat: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(f"🟢 Easy  +{COIN_EASY}🪙",   callback_data=f"ss_diff:easy:{cat}:{chat_id}"),
+        InlineKeyboardButton(f"🟡 Medium +{COIN_MEDIUM}🪙", callback_data=f"ss_diff:medium:{cat}:{chat_id}"),
+        InlineKeyboardButton(f"🔴 Hard  +{COIN_HARD}🪙",   callback_data=f"ss_diff:hard:{cat}:{chat_id}"),
+    ]])
+
+def _action_kb(chat_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(f"⏭ Skip (-{COIN_SKIP_PENALTY}🪙)", callback_data=f"ss_skip:{chat_id}"),
+        InlineKeyboardButton("✅ Done! (+coins)",                  callback_data=f"ss_done:{chat_id}"),
+    ]])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  GAME FLOW
+# ══════════════════════════════════════════════════════════════════════════════
+async def _begin_game(client, session: GameSession):
+    random.shuffle(session.players)
+    session.phase              = "playing"
+    session.current_player_idx = 0
+    session.round_num          = 1
+    session.is_lucky_round     = False
+
+    names = " • ".join(p.name for p in session.players)
+    await client.send_message(
+        session.chat_id,
+        f"🎮 **Game Starting!**\n\n"
+        f"👥 Players: {names}\n"
+        f"🔄 {session.total_rounds} rounds each\n"
+        f"🎰 Round {LUCKY_ROUND_EVERY}, {LUCKY_ROUND_EVERY*2}, {LUCKY_ROUND_EVERY*3}… = **Lucky Rounds** "
+        f"(double coins + char drop!)\n\n"
+        f"Goodluck~ 🔥",
+        disable_web_page_preview=True
+    )
+    await asyncio.sleep(1)
+    await _send_turn(client, session)
+
+
+async def _send_turn(client, session: GameSession):
+    cp = session.current_player
+    if not cp:
+        return
+
+    lucky_banner = f"\n\n{random.choice(LUCKY_TAUNTS)}\n" if session.is_lucky_round else ""
+
+    total_turns = session.total_rounds * len(session.players)
+    done_turns  = (session.round_num - 1) * len(session.players) + session.current_player_idx
+    done_turns  = min(done_turns, total_turns)
+    bar         = "▓" * done_turns + "░" * max(0, total_turns - done_turns)
+
+    text = (
+        f"╔══════════════════════╗\n"
+        f"   🍬 **Sweet or Spicy** 🌶️\n"
+        f"╚══════════════════════╝"
+        f"{lucky_banner}\n"
+        f"📍 Round **{session.round_num}/{session.total_rounds}**  `{bar}`\n\n"
+        f"👉 It's {_mention(cp)}'s turn!\n"
+        f"{'🔥 Streak: **' + str(cp.streak) + '** ' + '🔥' * min(cp.streak, 5) if cp.streak > 0 else ''}\n\n"
+        f"Pick your category 👇"
+    )
+    try:
+        msg = await client.send_message(
+            session.chat_id, text,
+            reply_markup=_category_kb(session.chat_id, session.is_lucky_round),
+            disable_web_page_preview=True
+        )
+        session.question_message_id = msg.id
+    except Exception:
+        pass
+
+
+async def _send_difficulty_pick(client, session: GameSession, cat: str):
+    cp        = session.current_player
+    cat_label = "🍬 Sweet" if cat == "sweet" else "🌶️ Spicy"
+    lucky_note = " *(All rewards doubled!)*" if session.is_lucky_round else ""
+
+    text = (
+        f"{cat_label} selected! Now pick your difficulty{lucky_note}:\n\n"
+        f"🟢 **Easy +{COIN_EASY}🪙** — simple, low risk\n"
+        f"🟡 **Medium +{COIN_MEDIUM}🪙** — spicy, moderate risk\n"
+        f"🔴 **Hard +{COIN_HARD}🪙** — chaotic, maximum reward\n\n"
+        f"💡 Hard/Lucky = guaranteed ⭐ character drop!"
+    )
+    try:
+        await client.edit_message_text(
+            session.chat_id, session.question_message_id, text,
+            reply_markup=_difficulty_kb(session.chat_id, cat),
+            disable_web_page_preview=True
+        )
+    except Exception:
+        try:
+            msg = await client.send_message(
+                session.chat_id, text,
+                reply_markup=_difficulty_kb(session.chat_id, cat),
+                disable_web_page_preview=True
+            )
+            session.question_message_id = msg.id
+        except Exception:
+            pass
+
+
+async def _send_question(client, session: GameSession, cat: str, difficulty: str):
+    q_type               = random.choice(["truth", "dare"])
+    session.last_category   = cat
+    session.last_type       = q_type
+    session.last_difficulty = difficulty
+
+    _, question = session.get_question(cat, q_type, difficulty)
+    cp          = session.current_player
+    diff_meta   = DIFFICULTY_META[difficulty]
+
+    type_emoji = {"sweet_truth": "💬", "sweet_dare": "🎀", "spicy_truth": "🌶️", "spicy_dare": "🔥"}
+    emoji      = type_emoji.get(f"{cat}_{q_type}", "❓")
+    cat_label  = "🍬 Sweet" if cat == "sweet" else "🌶️ Spicy"
+
+    base_coins   = diff_meta["coins"]
+    reward_coins = base_coins * (LUCKY_COIN_MULT if session.is_lucky_round else 1)
+    lucky_note   = f" **×{LUCKY_COIN_MULT} Lucky!**" if session.is_lucky_round else ""
+
+    streak_bonus = cp.streak * STREAK_BONUS
+    streak_note  = f" + 🔥{streak_bonus} streak" if streak_bonus > 0 else ""
+
+    char_drop_note = (
+        "\n⭐ **Character drop guaranteed!**"
+        if (session.is_lucky_round or difficulty == "hard") else
+        "\n🎲 Chance for character drop!"
+        if difficulty == "medium" else ""
+    )
+
+    text = (
+        f"{emoji} **{cat_label} — {'Truth' if q_type == 'truth' else 'Dare'}** {diff_meta['emoji']}\n\n"
+        f"👤 {_mention(cp)}, your challenge:\n\n"
+        f"❝ *{question}* ❞\n\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"💰 Reward: **{reward_coins:,}🪙**{lucky_note}{streak_note}"
+        f"{char_drop_note}\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"Only {_mention(cp)} can respond!"
+    )
+    try:
+        await client.edit_message_text(
+            session.chat_id, session.question_message_id, text,
+            reply_markup=_action_kb(session.chat_id),
+            disable_web_page_preview=True
+        )
+    except Exception:
+        try:
+            msg = await client.send_message(
+                session.chat_id, text,
+                reply_markup=_action_kb(session.chat_id),
+                disable_web_page_preview=True
+            )
+            session.question_message_id = msg.id
+        except Exception:
+            pass
+
+
+async def _send_vote(client, session: GameSession):
+    """Ask the group to vote on whether the active player completed the challenge."""
+    cp      = session.current_player
+    diff    = session.last_difficulty or "easy"
+    reward  = DIFFICULTY_META[diff]["coins"] * (LUCKY_COIN_MULT if session.is_lucky_round else 1)
+    others  = [p for p in session.players if p.user_id != cp.user_id]
+    needed  = max(1, len(others))
+
+    # Store vote state on session
+    session.vote = {
+        "yes":    [],        # user_ids who voted YES
+        "no":     [],        # user_ids who voted NO
+        "needed": needed,    # YES votes required to pass
+        "voters": [p.user_id for p in others],  # who is allowed to vote
+        "msg_id": None,
+        "resolved": False,
+    }
+
+    drop_hint = (
+        " + **guaranteed ⭐ char drop!**" if (session.is_lucky_round or diff == "hard")
+        else " + 🎲 chance for char drop" if diff == "medium"
+        else ""
+    )
+
+    text = (
+        f"🗳️ **Group Vote!**\n\n"
+        f"Did {_mention(cp)} actually complete the challenge?\n\n"
+        f"💰 Reward at stake: **{reward:,}🪙**{drop_hint}\n"
+        f"✅ Need **{needed}/{len(others)}** YES vote(s) to confirm\n\n"
+        f"👥 Only other players can vote!\n"
+        f"⏳ Voting closes in **30 seconds**"
+    )
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Yes  (0)", callback_data=f"ss_vote:yes:{session.chat_id}"),
+        InlineKeyboardButton("❌ No   (0)", callback_data=f"ss_vote:no:{session.chat_id}"),
+    ]])
+    try:
+        msg = await client.send_message(
+            session.chat_id, text,
+            reply_markup=kb, disable_web_page_preview=True
+        )
+        session.vote["msg_id"] = msg.id
+    except Exception:
+        pass
+
+    # Auto-resolve after 30s if nobody voted
+    await asyncio.sleep(30)
+    if session.chat_id in _games and not session.vote.get("resolved"):
+        await _resolve_vote(client, session, timed_out=True)
+
+
+async def _resolve_vote(client, session: GameSession, timed_out: bool = False):
+    """Finalise the vote — award rewards if passed, deny if failed."""
+    vote = getattr(session, "vote", None)
+    if not vote or vote.get("resolved"):
+        return
+    vote["resolved"] = True
+
+    cp      = session.current_player
+    yes_cnt = len(vote["yes"])
+    no_cnt  = len(vote["no"])
+    needed  = vote["needed"]
+    passed  = yes_cnt >= needed
+
+    # Remove vote buttons
+    try:
+        await client.edit_message_reply_markup(
+            session.chat_id, vote["msg_id"], reply_markup=None
+        )
+    except Exception:
+        pass
+
+    if not passed:
+        reason = (
+            "⏰ Time's up — not enough votes came in."
+            if timed_out
+            else f"❌ Group voted NO ({no_cnt} no vs {yes_cnt} yes)."
+        )
+        if cp:
+            cp.streak = 0   # reset streak on failed/rejected
+        await client.send_message(
+            session.chat_id,
+            f"{reason}\n\n"
+            f"😬 **{cp.name if cp else '?'}** gets nothing this round!\n\n"
+            f"{_scoreboard(session)}",
+            disable_web_page_preview=True
+        )
+    else:
+        # Vote passed — award coins + possible char drop
+        await _award_completion(client, session, cp)
+
+    session.vote = None
+
+    # Advance turn
+    await asyncio.sleep(2)
+    if not session.next_turn():
+        await _end_game(client, session)
+    else:
+        await _send_turn(client, session)
+
+
+async def _award_completion(client, session: GameSession, cp: Player):
+    """Award coins and trigger character drop after vote passes."""
+    diff       = session.last_difficulty or "easy"
+    cat        = session.last_category   or "sweet"
+    base_coin  = DIFFICULTY_META[diff]["coins"]
+    mult       = LUCKY_COIN_MULT if session.is_lucky_round else 1
+    coins      = base_coin * mult
+
+    streak_bonus = cp.streak * STREAK_BONUS
+    coins       += streak_bonus
+    cp.streak   += 1
+
+    if cat == "sweet":
+        cp.sweet_score += 1
+    else:
+        cp.spicy_score += 1
+
+    cp.coins_earned += coins
+    new_balance = await _award_coins(cp.user_id, coins)
+
+    react       = random.choice(REACTIONS[cat])
+    streak_line = f"\n🔥 **{cp.streak}x STREAK BONUS!** +{streak_bonus}🪙 extra!" if cp.streak >= 2 else ""
+    breakdown   = f"+{base_coin * mult:,} base" + (f" +{streak_bonus:,} streak" if streak_bonus else "")
+
+    result_text = (
+        f"✅ **{cp.name}** crushed the challenge!\n"
+        f"{react}"
+        f"{streak_line}\n\n"
+        f"💰 **+{coins:,}🪙** ({breakdown})\n"
+        f"🏦 New balance: `{new_balance:,}🪙`\n\n"
+        f"{_scoreboard(session)}"
+    )
+    try:
+        await client.send_message(session.chat_id, result_text, disable_web_page_preview=True)
+    except Exception:
+        pass
+
+    # ── Character drop ────────────────────────────────────────────────────── #
+    drop_chance = {"easy": 0.15, "medium": 0.40, "hard": 1.0}[diff]
+    if session.is_lucky_round:
+        drop_chance = 1.0
+
+    if random.random() < drop_chance:
+        char = await _get_random_character()
+        if char:
+            await _add_char_to_user(cp.user_id, str(char.get("_id", "")))
+            cp.chars_won += 1
+
+            char_name   = char.get("name",   char.get("character_name", "Unknown"))
+            char_anime  = char.get("anime",  char.get("series",         "Unknown Anime"))
+            char_rarity = char.get("rarity", "Common")
+            char_img    = char.get("img",    char.get("image_url",       None))
+
+            rarity_emoji = {
+                "common": "⚪", "uncommon": "🟢", "rare":  "🔵",
+                "epic":   "🟣", "legendary":"🟡", "mythic":"🔴",
+            }.get(str(char_rarity).lower(), "✨")
+
+            char_caption = (
+                f"⭐ **CHARACTER DROP!** ⭐\n\n"
+                f"🎴 **{char_name}**\n"
+                f"📺 *{char_anime}*\n"
+                f"{rarity_emoji} Rarity: `{char_rarity}`\n\n"
+                f"🎉 Added to {_mention(cp)}'s harem collection!"
+            )
+            try:
+                if char_img:
+                    await client.send_photo(session.chat_id, photo=char_img, caption=char_caption)
+                else:
+                    await client.send_message(session.chat_id, char_caption, disable_web_page_preview=True)
+            except Exception:
+                try:
+                    await client.send_message(session.chat_id, char_caption, disable_web_page_preview=True)
+                except Exception:
+                    pass
+
+
+async def _end_game(client, session: GameSession):
+    session.phase = "ended"
+    _games.pop(session.chat_id, None)
+
+    if not session.players:
+        await client.send_message(session.chat_id, "Game ended. 👋")
+        return
+
+    sorted_p = sorted(session.players, key=lambda p: p.coins_earned, reverse=True)
+    winner   = sorted_p[0]
+
+    jackpot       = random.randint(100, 500)
+    total_bonus   = WINNER_BONUS + jackpot
+    winner_bal    = await _award_coins(winner.user_id, total_bonus)
+    winner.coins_earned += total_bonus
+
+    for p in session.players:
+        if p.user_id != winner.user_id:
+            await _award_coins(p.user_id, PARTICIPATION)
+
+    total_sweet = sum(p.sweet_score for p in session.players)
+    total_spicy = sum(p.spicy_score for p in session.players)
+    vibe = (
+        "You're all total sweethearts! 🍬💕"       if total_sweet > total_spicy else
+        "This group is absolutely unhinged! 🌶️🔥" if total_spicy > total_sweet else
+        "Perfectly balanced — sweet AND spicy! 💘"
+    )
+
+    best_streak  = max(session.players, key=lambda p: p.streak)
+    most_chars   = max(session.players, key=lambda p: p.chars_won)
+    streak_line  = f"\n🔥 **Streak King:** {_mention(best_streak)} ({best_streak.streak}x!)" if best_streak.streak >= 2 else ""
+    char_line    = f"\n⭐ **Collector:** {_mention(most_chars)} ({most_chars.chars_won} chars!)" if most_chars.chars_won else ""
+
+    text = (
+        f"🎊 **GAME OVER!** 🎊\n\n"
+        f"🏆 **Winner: {_mention(winner)}**\n"
+        f"🎰 MVP Jackpot: **+{total_bonus:,}🪙** (balance: `{winner_bal:,}`)"
+        f"{streak_line}"
+        f"{char_line}\n\n"
+        f"{'━' * 18}\n"
+        f"{_scoreboard(session)}\n"
+        f"{'━' * 18}\n\n"
+        f"🎁 Everyone gets **+{PARTICIPATION}🪙** for playing!\n\n"
+        f"✨ *{vibe}*\n\n"
+        f"▶️ Start again with /sweetspicy"
+    )
+    await client.send_message(session.chat_id, text, disable_web_page_preview=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  COMMANDS
+# ══════════════════════════════════════════════════════════════════════════════
+@app.on_message(filters.command("sweetspicy") & filters.group)
+async def cmd_sweetspicy(client, message: Message):
+    chat_id = message.chat.id
+    if chat_id in _games:
+        phase = _games[chat_id].phase
+        if phase == "joining":
+            return await message.reply_text("⚠️ A lobby is already open! Tap **Join 💕**.")
+        if phase == "playing":
+            return await message.reply_text("⚠️ A game is in progress! Use /endgame to stop it.")
+
+    user    = message.from_user
+    session = GameSession(chat_id=chat_id, starter_id=user.id)
+    session.players.append(Player(user_id=user.id, name=user.first_name))
+    _games[chat_id] = session
+
+    text = (
+        f"🍬🌶️ **Sweet or Spicy — Ultimate Truth & Dare!**\n\n"
+        f"**{user.first_name}** opened a party! 🎉\n\n"
+        f"🎁 Complete challenges → earn **🪙 coins**\n"
+        f"⭐ Hard/Lucky rounds → **anime character drops**\n"
+        f"🔥 Chain wins → **streak bonuses**\n"
+        f"🏆 Top scorer wins a **jackpot**!\n\n"
+        f"👇 Tap **Join 💕** — lobby closes in **{LOBBY_WAIT}s**\n\n"
+        f"**Players joined ({len(session.players)}):**\n"
+        f"• {user.first_name}"
+    )
+    msg = await message.reply_text(text, reply_markup=_join_kb(chat_id))
+    session.join_message_id = msg.id
+
+    await asyncio.sleep(LOBBY_WAIT)
+    if chat_id in _games and _games[chat_id].phase == "joining":
+        s = _games[chat_id]
+        if len(s.players) < 2:
+            _games.pop(chat_id, None)
+            try:
+                await client.edit_message_text(
+                    chat_id, session.join_message_id,
+                    "❌ Game cancelled — not enough players joined (need at least 2).",
+                    reply_markup=None
+                )
+            except Exception:
+                pass
+        else:
+            await _begin_game(client, s)
+
+
+@app.on_message(filters.command("endgame") & filters.group)
+async def cmd_endgame(client, message: Message):
+    chat_id = message.chat.id
+    if chat_id not in _games:
+        return await message.reply_text("❌ No active game in this chat.")
+
+    session  = _games[chat_id]
+    user     = message.from_user
+    is_admin = False
+    try:
+        member = await client.get_chat_member(chat_id, user.id)
+        if member.status.name in ("ADMINISTRATOR", "OWNER"):
+            is_admin = True
+    except Exception:
+        pass
+
+    if user.id != session.starter_id and not is_admin:
+        return await message.reply_text("❌ Only the game starter or an admin can end the game.")
+
+    await message.reply_text("🛑 Game ended early. Tallying results...")
+    await _end_game(client, session)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CALLBACKS
+# ══════════════════════════════════════════════════════════════════════════════
+@app.on_callback_query(filters.regex(r"^ss_"))
+async def on_callback(client, query: CallbackQuery):
+    data = query.data
+    user = query.from_user
+
+    # JOIN
+    if data.startswith("ss_join:"):
+        chat_id = int(data.split(":")[1])
+        session = _games.get(chat_id)
+        if not session or session.phase != "joining":
+            return await query.answer("⏰ Lobby is closed!", show_alert=True)
+        if any(p.user_id == user.id for p in session.players):
+            return await query.answer("You already joined! 💕", show_alert=True)
+
+        session.players.append(Player(user_id=user.id, name=user.first_name))
+        await query.answer("You're in the game! 🎉")
+        pl = "\n".join(f"• {p.name}" for p in session.players)
+        try:
+            await query.edit_message_text(
+                f"🍬🌶️ **Sweet or Spicy!**\n\n"
+                f"👇 Tap **Join 💕** to play!\n\n"
+                f"**Players ({len(session.players)}):**\n{pl}",
+                reply_markup=_join_kb(chat_id)
+            )
+        except MessageNotModified:
+            pass
+
+    # FORCE START
+    elif data.startswith("ss_forcestart:"):
+        chat_id = int(data.split(":")[1])
+        session = _games.get(chat_id)
+        if not session or session.phase != "joining":
+            return await query.answer("No active lobby!", show_alert=True)
+        if user.id != session.starter_id:
+            return await query.answer("Only the host can force start! 😅", show_alert=True)
+        if len(session.players) < 2:
+            return await query.answer("Need at least 2 players first! 🙏", show_alert=True)
+        await query.answer("Starting now! 🎮")
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await _begin_game(client, session)
+
+    # CATEGORY PICK
+    elif data.startswith("ss_cat:"):
+        parts   = data.split(":")
+        cat     = parts[1]
+        chat_id = int(parts[2])
+        session = _games.get(chat_id)
+        if not session or session.phase != "playing":
+            return await query.answer("No active game!", show_alert=True)
+        cp = session.current_player
+        if not cp or user.id != cp.user_id:
+            return await query.answer(f"It's {cp.name if cp else 'someone else'}'s turn! 😅", show_alert=True)
+        await query.answer(f"{'🍬 Sweet' if cat == 'sweet' else '🌶️ Spicy'} — pick difficulty!")
+        await _send_difficulty_pick(client, session, cat)
+
+    # DIFFICULTY PICK
+    elif data.startswith("ss_diff:"):
+        parts      = data.split(":")
+        difficulty = parts[1]
+        cat        = parts[2]
+        chat_id    = int(parts[3])
+        session    = _games.get(chat_id)
+        if not session or session.phase != "playing":
+            return await query.answer("No active game!", show_alert=True)
+        cp = session.current_player
+        if not cp or user.id != cp.user_id:
+            return await query.answer(f"It's {cp.name if cp else 'someone else'}'s turn! 😅", show_alert=True)
+        await query.answer(f"{DIFFICULTY_META[difficulty]['label']} — let's go!")
+        await _send_question(client, session, cat, difficulty)
+
+    # DONE — triggers group vote instead of instant reward
+    elif data.startswith("ss_done:"):
+        chat_id = int(data.split(":")[1])
+        session = _games.get(chat_id)
+        if not session or session.phase != "playing":
+            return await query.answer("No active game!", show_alert=True)
+        cp = session.current_player
+        if not cp or user.id != cp.user_id:
+            return await query.answer(f"Only {cp.name if cp else 'the active player'} can do this! 😅", show_alert=True)
+        if getattr(session, "vote", None) and not session.vote.get("resolved"):
+            return await query.answer("A vote is already in progress!", show_alert=True)
+
+        await query.answer("🗳️ Sending it to a group vote!")
+        # Remove action buttons from the question card
+        try:
+            await client.edit_message_reply_markup(
+                session.chat_id, session.question_message_id, reply_markup=None
+            )
+        except Exception:
+            pass
+        # Launch vote (this sleeps 30s internally — run as a task)
+        asyncio.create_task(_send_vote(client, session))
+
+    # VOTE
+    elif data.startswith("ss_vote:"):
+        parts   = data.split(":")
+        verdict = parts[1]       # "yes" or "no"
+        chat_id = int(parts[2])
+        session = _games.get(chat_id)
+        vote    = getattr(session, "vote", None)
+
+        if not session or not vote or vote.get("resolved"):
+            return await query.answer("This vote has already closed!", show_alert=True)
+
+        cp = session.current_player
+        # Active player cannot vote on their own challenge
+        if cp and user.id == cp.user_id:
+            return await query.answer("You can't vote on your own challenge! 😅", show_alert=True)
+
+        # Only registered players can vote
+        if user.id not in vote["voters"]:
+            return await query.answer("Only players in this game can vote!", show_alert=True)
+
+        # Remove previous vote if they're changing their mind
+        vote["yes"] = [v for v in vote["yes"] if v != user.id]
+        vote["no"]  = [v for v in vote["no"]  if v != user.id]
+
+        if verdict == "yes":
+            vote["yes"].append(user.id)
+            await query.answer("✅ You voted YES!")
+        else:
+            vote["no"].append(user.id)
+            await query.answer("❌ You voted NO!")
+
+        yes_cnt = len(vote["yes"])
+        no_cnt  = len(vote["no"])
+        needed  = vote["needed"]
+        total   = len(vote["voters"])
+
+        # Update vote message with live counts
+        diff    = session.last_difficulty or "easy"
+        reward  = DIFFICULTY_META[diff]["coins"] * (LUCKY_COIN_MULT if session.is_lucky_round else 1)
+        drop_hint = (
+            " + **guaranteed ⭐ char drop!**" if (session.is_lucky_round or diff == "hard")
+            else " + 🎲 chance for char drop" if diff == "medium"
+            else ""
+        )
+        text = (
+            f"🗳️ **Group Vote!**\n\n"
+            f"Did {_mention(cp)} actually complete the challenge?\n\n"
+            f"💰 Reward at stake: **{reward:,}🪙**{drop_hint}\n"
+            f"✅ Need **{needed}/{total}** YES vote(s)\n\n"
+            f"✅ Yes: **{yes_cnt}**  ❌ No: **{no_cnt}**\n"
+            f"⏳ Voting closes in 30 seconds"
+        )
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton(f"✅ Yes  ({yes_cnt})", callback_data=f"ss_vote:yes:{chat_id}"),
+            InlineKeyboardButton(f"❌ No   ({no_cnt})",  callback_data=f"ss_vote:no:{chat_id}"),
+        ]])
+        try:
+            await query.edit_message_text(text, reply_markup=kb, disable_web_page_preview=True)
+        except MessageNotModified:
+            pass
+
+        # Auto-resolve immediately if all eligible players have voted
+        all_voted = (yes_cnt + no_cnt) >= total
+        if all_voted and not vote.get("resolved"):
+            await _resolve_vote(client, session)
+
+    # SKIP
+    elif data.startswith("ss_skip:"):
+        chat_id = int(data.split(":")[1])
+        session = _games.get(chat_id)
+        if not session or session.phase != "playing":
+            return await query.answer("No active game!", show_alert=True)
+        cp = session.current_player
+        if not cp or user.id != cp.user_id:
+            return await query.answer(f"Only {cp.name if cp else 'the active player'} can skip! 😅", show_alert=True)
+
+        cp.skips             += 1
+        cp.streak             = 0
+        cp.coins_earned       = max(0, cp.coins_earned - COIN_SKIP_PENALTY)
+        await _award_coins(cp.user_id, -COIN_SKIP_PENALTY)
+
+        taunt = random.choice(SKIP_TAUNTS)
+        await query.answer(f"⏭ Skipped! -{COIN_SKIP_PENALTY}🪙  {taunt}", show_alert=True)
+
+        if session.last_category and session.last_difficulty:
+            await _send_question(client, session, session.last_category, session.last_difficulty)
+        else:
+            await _send_turn(client, session)

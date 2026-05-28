@@ -1,0 +1,526 @@
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from datetime import datetime, timedelta
+from bson.objectid import ObjectId
+import asyncio
+import random
+from typing import Dict, List
+from itertools import zip_longest
+
+# Database collections (you'll need to initialize these)
+from . import app, user_collection, collection, chat_auctions, active_auctions
+
+OWNER_ID = 7861332030  # Your Telegram ID
+SUPPORT_GROUP = -1002319525523  # Your main support group
+SUPPORT_CHANNEL = -1002681814995  # Your announcement channel
+
+RARITIES = [
+    "🟡 Legendary",
+    "💮 Mythic",
+    "🔮 Limited Edition",
+    "🫧 Premium"
+]
+
+# Global dictionaries to track state
+chat_auction_settings: Dict[int, Dict] = {}  # {chat_id: {"message_count": int, "auto_spawn": bool}}
+active_chat_auctions: Dict[int, Dict] = {}  # {chat_id: auction_data}
+user_bid_counts: Dict[int, Dict[int, int]] = {}  # {chat_id: {user_id: bid_count}}
+
+# Initialize on startup
+async def init_auction_data():
+    global chat_auction_settings, active_chat_auctions
+    
+    # Load chat settings from DB
+    async for chat in chat_auctions.find():
+        chat_auction_settings[chat["chat_id"]] = {
+            "message_count": chat.get("message_count", 99),
+            "auto_spawn": chat.get("auto_spawn", True)
+        }
+    
+    # Load active auctions from DB
+    async for auction in active_auctions.find():
+        active_chat_auctions[auction["chat_id"]] = auction
+
+# Start auction monitoring
+async def monitor_chat_auctions():
+    while True:
+        current_time = datetime.utcnow()
+        
+        # Check each active auction
+        for chat_id, auction_data in list(active_chat_auctions.items()):
+            try:
+                last_bid_time = auction_data.get("last_bid_time", auction_data["start_time"])
+                time_since_last_bid = current_time - last_bid_time
+                
+                # Check if auction should end
+                if time_since_last_bid >= timedelta(minutes=2):
+                    await end_chat_auction(chat_id, auction_data)
+                    
+                # Special case for first bid timeout
+                elif auction_data["highest_bid"] == 0 and time_since_last_bid >= timedelta(minutes=1):
+                    await cancel_chat_auction(chat_id, auction_data)
+                    
+            except Exception as e:
+                print(f"Error monitoring auction in chat {chat_id}: {e}")
+                continue
+                
+        await asyncio.sleep(30)
+
+# Helper function to end auction
+async def end_chat_auction(chat_id: int, auction_data: Dict):
+    char = auction_data["char"]
+    highest_bid = auction_data["highest_bid"]
+    highest_user_id = auction_data["highest_user"]
+    
+    if highest_user_id:
+        # Add character to winner's collection
+        await user_collection.update_one(
+            {"id": highest_user_id},
+            {"$push": {"characters": char}},
+            upsert=True
+        )
+        
+        # Get winner mention
+        try:
+            user = await app.get_users(highest_user_id)
+            mention = user.mention
+        except:
+            mention = f"User {highest_user_id}"
+            
+        caption = (
+            f"**🎉 Auction Ended!**\n\n"
+            f"🏆 **Character:** `{char['name']}`\n"
+            f"🧬 **Anime:** `{char['anime']}`\n"
+            f"✨ **Rarity:** {char['rarity']}\n"
+            f"💰 **Winning Bid:** `{highest_bid:,}`\n"
+            f"👑 **Winner:** {mention}\n\n"
+            f"Character has been added to their collection!"
+        )
+        
+        # Try to DM winner
+        try:
+            await app.send_message(
+                highest_user_id,
+                f"🎉 **You won {char['name']}** in the auction!\n"
+                f"Paid: `{highest_bid:,}` coins\n"
+                f"Added to your collection!"
+            )
+        except:
+            pass
+            
+    else:
+        caption = (
+            f"**❌ Auction Ended**\n\n"
+            f"🏷️ **Character:** `{char['name']}`\n"
+            f"🧬 **Anime:** `{char['anime']}`\n"
+            f"✨ **Rarity:** {char['rarity']}\n\n"
+            f"No valid bids were placed!"
+        )
+        
+    # Send result to chat
+    if char.get("video_url"):
+        await app.send_video(chat_id, char["video_url"], caption=caption)
+    else:
+        await app.send_photo(chat_id, char["img_url"], caption=caption)
+        
+    # Clean up
+    del active_chat_auctions[chat_id]
+    await active_auctions.delete_one({"chat_id": chat_id})
+    
+    # Reset bid counts for this chat
+    if chat_id in user_bid_counts:
+        del user_bid_counts[chat_id]
+
+# Helper function to cancel auction
+async def cancel_chat_auction(chat_id: int, auction_data: Dict):
+    char = auction_data["char"]
+    
+    caption = (
+        f"**❌ Auction Canceled**\n\n"
+        f"🏷️ **Character:** `{char['name']}`\n"
+        f"🧬 **Anime:** `{char['anime']}`\n"
+        f"✨ **Rarity:** {char['rarity']}\n\n"
+        f"No bids were placed in time!"
+    )
+    
+    # Send cancellation message
+    if char.get("video_url"):
+        await app.send_video(chat_id, char["video_url"], caption=caption)
+    else:
+        await app.send_photo(chat_id, char["img_url"], caption=caption)
+        
+    # Clean up
+    del active_chat_auctions[chat_id]
+    await active_auctions.delete_one({"chat_id": chat_id})
+    
+    # Reset bid counts for this chat
+    if chat_id in user_bid_counts:
+        del user_bid_counts[chat_id]
+
+# Start monitoring on bot startup
+asyncio.create_task(init_auction_data())
+asyncio.create_task(monitor_chat_auctions())
+
+# /startca - Start auctions in all chats (owner only)
+@app.on_message(filters.command("startca") & filters.user(OWNER_ID))
+async def start_all_chat_auctions(client: Client, message: Message):
+    # Enable auctions in all chats that have settings
+    await chat_auctions.update_many({}, {"$set": {"enabled": True}})
+    
+    # Update local cache
+    async for chat in chat_auctions.find():
+        chat_auction_settings[chat["chat_id"]] = {
+            "message_count": chat.get("message_count", 99),
+            "auto_spawn": chat.get("auto_spawn", True),
+            "enabled": True
+        }
+    
+    await message.reply("✅ Auctions enabled in all chats!")
+    
+    # Notify all chats
+    async for chat in chat_auctions.find():
+        try:
+            chat_obj = await client.get_chat(chat["chat_id"])
+            await client.send_message(
+                chat["chat_id"],
+                f"🎉 **Chat Auction System Activated!**\n\n"
+                f"This chat now has automatic character auctions!\n\n"
+                f"Admins can configure with:\n"
+                f"/atime [count] - Set message count between auctions\n"
+                f"(Default: 99 messages)\n\n"
+                f"Users can bid with /mbid when an auction is active!"
+            )
+        except Exception as e:
+            print(f"Couldn't notify chat {chat['chat_id']}: {e}")
+
+# /stopca - Stop auctions in all chats (owner only)
+@app.on_message(filters.command("stopca") & filters.user(OWNER_ID))
+async def stop_all_chat_auctions(client: Client, message: Message):
+    # Disable auctions in all chats
+    await chat_auctions.update_many({}, {"$set": {"enabled": False}})
+    
+    # Update local cache
+    for chat_id in chat_auction_settings:
+        chat_auction_settings[chat_id]["enabled"] = False
+    
+    await message.reply("❌ Auctions disabled in all chats!")
+    
+    # Notify all chats with active auctions
+    for chat_id in list(active_chat_auctions.keys()):
+        try:
+            await client.send_message(
+                chat_id,
+                "❌ **Chat Auction System Disabled!**\n\n"
+                "All active auctions have been canceled by the bot owner."
+            )
+            
+            # Clean up active auction
+            if chat_id in active_chat_auctions:
+                del active_chat_auctions[chat_id]
+            await active_auctions.delete_one({"chat_id": chat_id})
+            
+        except Exception as e:
+            print(f"Couldn't notify chat {chat_id}: {e}")
+
+# /cauction - Check enabled chats (owner only)
+@app.on_message(filters.command("cauction") & filters.user(OWNER_ID))
+async def check_active_auctions(client: Client, message: Message):
+    enabled_chats = []
+    async for chat in chat_auctions.find({"enabled": True}):
+        try:
+            chat_obj = await client.get_chat(chat["chat_id"])
+            chat_name = chat_obj.title
+            enabled_chats.append(f"• {chat_name} (ID: {chat['chat_id']})")
+        except:
+            enabled_chats.append(f"• Unknown Chat (ID: {chat['chat_id']})")
+    
+    if not enabled_chats:
+        return await message.reply("No chats have auctions enabled currently.")
+    
+    text = "**📊 Active Auction Chats:**\n\n" + "\n".join(enabled_chats)
+    await message.reply(text)
+
+# /atime - Set message count for auctions (admin only)
+@app.on_message(filters.command("atime") & filters.group)
+async def set_auction_time(client: Client, message: Message):
+    # Check if user is admin or owner
+    user = message.from_user
+    chat_id = message.chat.id
+    
+    member = await client.get_chat_member(chat_id, user.id)
+    if member.status not in ["administrator", "creator"] and user.id != OWNER_ID:
+        return await message.reply("Only admins can set auction settings!")
+    
+    try:
+        count = int(message.text.split()[1])
+        if count < 1:
+            return await message.reply("Please enter a number greater than 0!")
+    except (IndexError, ValueError):
+        return await message.reply("Usage: /atime [message_count]")
+    
+    # Update settings
+    await chat_auctions.update_one(
+        {"chat_id": chat_id},
+        {"$set": {"message_count": count}},
+        upsert=True
+    )
+    
+    # Update local cache
+    if chat_id not in chat_auction_settings:
+        chat_auction_settings[chat_id] = {"auto_spawn": True}
+    chat_auction_settings[chat_id]["message_count"] = count
+    
+    await message.reply(f"✅ Auction spawn set to every `{count}` messages!")
+
+# Track messages for auto-spawning auctions
+@app.on_message(filters.group & ~filters.service)
+async def track_messages(client: Client, message: Message):
+    chat_id = message.chat.id
+    
+    # Skip if auctions not enabled or already active
+    if (chat_id not in chat_auction_settings or 
+        not chat_auction_settings[chat_id].get("enabled", False) or
+        chat_id in active_chat_auctions):
+        return
+    
+    # Initialize message count if not exists
+    if "msg_counter" not in chat_auction_settings[chat_id]:
+        chat_auction_settings[chat_id]["msg_counter"] = 0
+    
+    # Increment counter
+    chat_auction_settings[chat_id]["msg_counter"] += 1
+    
+    # Check if it's time to spawn
+    required = chat_auction_settings[chat_id].get("message_count", 99)
+    if chat_auction_settings[chat_id]["msg_counter"] >= required:
+        await spawn_chat_auction(chat_id)
+        chat_auction_settings[chat_id]["msg_counter"] = 0
+
+# Spawn a new auction in chat
+async def spawn_chat_auction(chat_id: int):
+    # Skip if already active
+    if chat_id in active_chat_auctions:
+        return
+    
+    # Get random character from allowed rarities
+    char = await collection.aggregate([
+        {"$match": {"rarity": {"$in": RARITIES}}},
+        {"$sample": {"size": 1}}
+    ]).to_list(1)
+    
+    if not char:
+        return  # No characters available
+    
+    char = char[0]
+    char["_id"] = str(char["_id"])
+    
+    # Create auction data
+    auction_data = {
+        "chat_id": chat_id,
+        "char": char,
+        "start_time": datetime.utcnow(),
+        "highest_bid": 0,
+        "highest_user": None,
+        "bidders": [],
+        "last_bid_time": datetime.utcnow()
+    }
+    
+    # Save to DB and memory
+    await active_auctions.insert_one(auction_data)
+    active_chat_auctions[chat_id] = auction_data
+    
+    # Send auction message
+    caption = (
+        f"**🎉 NEW AUCTION STARTED!**\n\n"
+        f"🏷️ **Name:** `{char['name']}`\n"
+        f"🧬 **Anime:** `{char['anime']}`\n"
+        f"✨ **Rarity:** {char['rarity']}\n\n"
+        f"💵 **Starting Bid:** `10,000` coins\n"
+        f"⏳ **Time Left:** 2 minutes\n\n"
+        f"Use `/mbid [amount]` to place your bid!"
+    )
+    
+    if char.get("video_url"):
+        await app.send_video(chat_id, char["video_url"], caption=caption)
+    else:
+        await app.send_photo(chat_id, char["img_url"], caption=caption)
+
+# /mbid - Place bid in chat auction
+@app.on_message(filters.command("mbid") & filters.group)
+async def place_chat_bid(client: Client, message: Message):
+    chat_id = message.chat.id
+    
+    # Check if auction is active
+    if chat_id not in active_chat_auctions:
+        return await message.reply("No auction is currently active in this chat!")
+    
+    auction_data = active_chat_auctions[chat_id]
+    user = message.from_user
+    
+    try:
+        amount = int(message.text.split()[1].replace(",", ""))
+    except (IndexError, ValueError):
+        return await message.reply("Usage: /mbid [amount]")
+    
+    # Check minimum bid
+    if amount < 10000:
+        return await message.reply("Minimum bid is 10,000 coins!")
+    
+    # Check if higher than current bid
+    if amount <= auction_data["highest_bid"]:
+        return await message.reply(f"Bid must be higher than current highest bid (`{auction_data['highest_bid']:,}`)!")
+    
+    # Get user balance
+    user_data = await user_collection.find_one({"id": user.id})
+    if not user_data:
+        return await message.reply("You don't have an account! Create one first.")
+    
+    try:
+        balance = int(user_data.get("balance", 0))
+    except:
+        balance = 0
+        await user_collection.update_one({"id": user.id}, {"$set": {"balance": 0}})
+    
+    if balance < amount:
+        return await message.reply(f"You don't have enough coins! (Balance: `{balance:,}`)")
+    
+    # Refund previous highest bidder
+    prev_bidder = auction_data["highest_user"]
+    prev_amount = auction_data["highest_bid"]
+    
+    if prev_bidder and prev_bidder != user.id:
+        prev_user_data = await user_collection.find_one({"id": prev_bidder})
+        if prev_user_data:
+            try:
+                prev_balance = int(prev_user_data.get("balance", 0))
+            except:
+                prev_balance = 0
+                
+            await user_collection.update_one(
+                {"id": prev_bidder},
+                {"$set": {"balance": prev_balance + prev_amount}}
+            )
+            
+            try:
+                await client.send_message(
+                    prev_bidder,
+                    f"❌ You've been outbid in {message.chat.title}!\n"
+                    f"Your `{prev_amount:,}` coins have been refunded."
+                )
+            except:
+                pass
+    
+    # Deduct coins from new bidder
+    await user_collection.update_one(
+        {"id": user.id},
+        {"$set": {"balance": balance - amount}}
+    )
+    
+    # Update auction data
+    auction_data["highest_bid"] = amount
+    auction_data["highest_user"] = user.id
+    auction_data["last_bid_time"] = datetime.utcnow()
+    auction_data["bidders"].append({
+        "user_id": user.id,
+        "amount": amount,
+        "time": datetime.utcnow()
+    })
+    
+    # Update in DB
+    await active_auctions.update_one(
+        {"chat_id": chat_id},
+        {"$set": {
+            "highest_bid": amount,
+            "highest_user": user.id,
+            "last_bid_time": datetime.utcnow()
+        },
+        "$push": {
+            "bidders": {
+                "user_id": user.id,
+                "amount": amount,
+                "time": datetime.utcnow()
+            }
+        }}
+    )
+    
+    # Track bid counts
+    if chat_id not in user_bid_counts:
+        user_bid_counts[chat_id] = {}
+    user_bid_counts[chat_id][user.id] = user_bid_counts[chat_id].get(user.id, 0) + 1
+    
+    # Notify chat
+    await message.reply(
+        f"🧨 **New Bid!** {user.mention} bid `{amount:,}` coins!\n"
+        f"Current highest: `{amount:,}`"
+    )
+
+# /bidders - Check current bidders
+@app.on_message(filters.command("bidders") & filters.group)
+async def show_bidders(client: Client, message: Message):
+    chat_id = message.chat.id
+    
+    if chat_id not in active_chat_auctions:
+        return await message.reply("No active auction in this chat!")
+    
+    auction_data = active_chat_auctions[chat_id]
+    char = auction_data["char"]
+    bidders = auction_data.get("bidders", [])
+    
+    if not bidders:
+        return await message.reply("No bids placed yet!")
+    
+    # Sort bidders by amount (descending)
+    sorted_bidders = sorted(bidders, key=lambda x: x["amount"], reverse=True)
+    
+    text = (
+        f"**🏆 Current Bidders for {char['name']}**\n"
+        f"✨ {char['rarity']} | 💰 Highest: `{auction_data['highest_bid']:,}`\n\n"
+    )
+    
+    # Show top 10 bidders
+    for i, bid in enumerate(sorted_bidders[:10], 1):
+        try:
+            user = await client.get_users(bid["user_id"])
+            name = user.first_name
+        except:
+            name = f"User {bid['user_id']}"
+        
+        text += f"{i}. {name} - `{bid['amount']:,}`\n"
+    
+    await message.reply(text)
+
+# /currentbid - Show current auction info
+@app.on_message(filters.command("currentbid") & filters.group)
+async def show_current_bid(client: Client, message: Message):
+    chat_id = message.chat.id
+    
+    if chat_id not in active_chat_auctions:
+        return await message.reply("No active auction in this chat!")
+    
+    auction_data = active_chat_auctions[chat_id]
+    char = auction_data["char"]
+    highest_bid = auction_data["highest_bid"]
+    highest_user = auction_data["highest_user"]
+    
+    time_left = timedelta(minutes=2) - (datetime.utcnow() - auction_data["last_bid_time"])
+    mins, secs = divmod(time_left.seconds, 60)
+    
+    text = (
+        f"**⏳ Current Auction**\n\n"
+        f"🏷️ **Character:** `{char['name']}`\n"
+        f"🧬 **Anime:** `{char['anime']}`\n"
+        f"✨ **Rarity:** {char['rarity']}\n\n"
+        f"💰 **Highest Bid:** `{highest_bid:,}`\n"
+        f"⏱️ **Time Left:** {mins}m {secs}s\n\n"
+    )
+    
+    if highest_user:
+        try:
+            user = await client.get_users(highest_user)
+            text += f"👑 **Highest Bidder:** {user.mention}\n"
+        except:
+            text += f"👑 **Highest Bidder:** User {highest_user}\n"
+    
+    text += "\nUse `/mbid [amount]` to place your bid!"
+    
+    await message.reply(text)

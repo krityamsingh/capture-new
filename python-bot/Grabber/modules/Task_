@@ -1,0 +1,694 @@
+from pyrogram import Client, filters
+from pyrogram.types import Message, InputMediaPhoto, InputMediaVideo, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from asyncio import sleep, Lock
+from datetime import datetime, timedelta
+import random
+import asyncio
+from . import app, collection, user_collection, ac
+
+# Owner ID for managing tasks
+OWNER_ID = 7861332030
+
+# Support group and channel IDs
+SUPPORT_GROUP_ID = -1002411889377
+SUPPORT_CHANNEL_ID = -1002681814995
+SUPPORT_GROUP_LINK = "Phoenix_Reen"
+SUPPORT_CHANNEL_LINK = "Capture_Update"
+
+# Task cooldown (24 hours)
+TASK_COOLDOWN_HOURS = 24
+
+# Tic Tac Toe game states
+games = {}
+game_lock = Lock()
+
+# Support group button for use in multiple places
+support_button = InlineKeyboardMarkup(
+    [[InlineKeyboardButton("Join Support Group", url=f"t.me/{SUPPORT_GROUP_LINK}")]]
+)
+
+def is_support_group():
+    """Decorator to check if command is used in support group"""
+    def func(flt, client, message):
+        return message.chat.id == SUPPORT_GROUP_ID
+    return filters.create(func)
+
+async def check_support_group(message):
+    """Check if message is from support group, return button if not"""
+    if message.chat.id != SUPPORT_GROUP_ID:
+        await message.reply_text(
+            "⚠️ This command can only be used in our support group!",
+            reply_markup=support_button
+        )
+        return False
+    return True
+
+# Task management commands
+@app.on_message(filters.command("task"))
+async def task_info(client: Client, message: Message):
+    user_id = message.from_user.id
+    user_data = await user_collection.find_one({"user_id": user_id})
+    
+    # Check if user is in cooldown
+    if user_data and user_data.get("task_cooldown"):
+        cooldown_end = user_data["task_cooldown"]
+        if datetime.now() < cooldown_end:
+            time_left = cooldown_end - datetime.now()
+            hours, remainder = divmod(time_left.seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            
+            await message.reply_text(
+                f"⏰ **Task Cooldown Active**\n\n"
+                f"You've already completed your support tasks!\n"
+                f"Next available in: {hours}h {minutes}m {seconds}s\n\n"
+                f"Check back later for more rewards!"
+            )
+            return
+    
+    # Get user's current progress
+    progress_text = await get_task_progress(user_id)
+    
+    await message.reply_text(
+        f"🎯 **Support Task Rewards**\n\n"
+        f"Complete these tasks to earn special characters:\n\n"
+        f"1. Send 100+ messages in our support group\n"
+        f"2. Add '@CharacterCaptureBot' to your bio\n"
+        f"3. Add 'あ' at the end of your name\n"
+        f"4. Win a Tic-Tac-Toe game against another user\n\n"
+        f"**Your Progress:**\n{progress_text}\n\n"
+        f"After completing all tasks, use /tclaim to claim your reward!\n"
+        f"**Reward:** 2 ⚜️ Animated + 1 🎐 Crystal characters!\n\n"
+        f"💡 **Tip:** Join our support group to complete these tasks!",
+        reply_markup=support_button
+    )
+
+@app.on_message(filters.command("tclaim"))
+async def claim_task_reward(client: Client, message: Message):
+    user_id = message.from_user.id
+    user_data = await user_collection.find_one({"user_id": user_id})
+    
+    # Check if user is in cooldown
+    if user_data and user_data.get("task_cooldown"):
+        cooldown_end = user_data["task_cooldown"]
+        if datetime.now() < cooldown_end:
+            time_left = cooldown_end - datetime.now()
+            hours, remainder = divmod(time_left.seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            
+            await message.reply_text(
+                f"⏰ **Task Cooldown Active**\n\n"
+                f"You've already claimed your reward!\n"
+                f"Next available in: {hours}h {minutes}m {seconds}s"
+            )
+            return
+    
+    # Check if all tasks are completed
+    if not user_data or not all([
+        user_data.get("task_messages", 0) >= 100,
+        user_data.get("task_bio", False),
+        user_data.get("task_name", False),
+        user_data.get("task_game", False)
+    ]):
+        progress_text = await get_task_progress(user_id)
+        await message.reply_text(
+            f"❌ **Tasks Not Completed**\n\n"
+            f"You haven't completed all support tasks yet!\n\n"
+            f"**Your Progress:**\n{progress_text}\n\n"
+            f"Use /task to see what you need to complete."
+        )
+        return
+    
+    # All tasks completed - give reward
+    sticker_message = await message.reply_sticker("CAACAgIAAyEFAASBaLQkAAEKEP9ol3VdTO_q2ptV1V1Xi5PUgfDOUAACNF0AAnNF2Emgpq9l1WqU6TYE")
+    
+    try:
+        # Get 2 Animation rarity characters
+        animated_chars = []
+        pipeline = [
+            {"$match": {"rarity": "⚜️ Animated"}},
+            {"$sample": {"size": 2}}
+        ]
+        chars = await collection.aggregate(pipeline).to_list(2)
+        animated_chars.extend(chars)
+        
+        # Get 1 Crystal rarity character
+        pipeline = [
+            {"$match": {"rarity": "🎐 Crystal"}},
+            {"$sample": {"size": 1}}
+        ]
+        crystal_char = await collection.aggregate(pipeline).to_list(1)
+        if crystal_char:
+            animated_chars.append(crystal_char[0])
+        
+        if len(animated_chars) < 3:
+            await message.reply_text("⚠️ Not enough characters available for reward. Contact admin!")
+            await sticker_message.delete()
+            return
+        
+        # Add characters to user's collection
+        for char in animated_chars:
+            await ac(user_id, char["id"])
+        
+        # Set cooldown
+        cooldown_end = datetime.now() + timedelta(hours=TASK_COOLDOWN_HOURS)
+        await user_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"task_cooldown": cooldown_end}}
+        )
+        
+        # Send reward message
+        caption = (
+            f"🎉 **Congratulations!**\n\n"
+            f"You've completed all support tasks!\n\n"
+            f"**Reward Claimed:**\n"
+            f"• 2 ⚜️ Animated characters\n"
+            f"• 1 🎐 Crystal character\n\n"
+            f"Check your collection with /collection\n\n"
+            f"Next reward available in {TASK_COOLDOWN_HOURS} hours!"
+        )
+        
+        # Send media if available
+        media_group = []
+        for i, char in enumerate(animated_chars):
+            media_caption = caption if i == 0 else ""
+            if char.get("video_url"):
+                media = InputMediaVideo(char["video_url"], caption=media_caption)
+            else:
+                media = InputMediaPhoto(char["img_url"], caption=media_caption)
+            media_group.append(media)
+        
+        await message.reply_media_group(media_group)
+        await sticker_message.delete()
+        
+        # Schedule cooldown completion message
+        asyncio.create_task(send_cooldown_completion(user_id, cooldown_end))
+        
+    except Exception as e:
+        print(f"Error in task reward claim: {e}")
+        await message.reply_text("⚠️ An unexpected error occurred. Please try again later.")
+        try:
+            await sticker_message.delete()
+        except:
+            pass
+
+async def send_cooldown_completion(user_id, cooldown_end):
+    """Send a message when cooldown completes"""
+    await sleep((cooldown_end - datetime.now()).total_seconds())
+    try:
+        await app.send_message(
+            user_id,
+            "🎉 **Task Cooldown Complete!**\n\n"
+            "Your support tasks have been reset!\n"
+            "You can now complete them again for more rewards.\n\n"
+            "Use /task to see what you need to do!"
+        )
+    except:
+        pass  # User might have blocked the bot
+
+async def get_task_progress(user_id):
+    """Get formatted task progress text"""
+    user_data = await user_collection.find_one({"user_id": user_id}) or {}
+    
+    messages = user_data.get("task_messages", 0)
+    bio_complete = user_data.get("task_bio", False)
+    name_complete = user_data.get("task_name", False)
+    game_complete = user_data.get("task_game", False)
+    
+    progress = [
+        f"{'✅' if messages >= 100 else '❌'} 100+ Support Group Messages ({messages}/100)",
+        f"{'✅' if bio_complete else '❌'} Bio contains @CharacterCaptureBot",
+        f"{'✅' if name_complete else '❌'} Name ends with あ",
+        f"{'✅' if game_complete else '❌'} Win a Tic-Tac-Toe game"
+    ]
+    
+    return "\n".join(progress)
+
+# Message counter for support group
+@app.on_message(filters.chat(SUPPORT_GROUP_ID) & filters.text & ~filters.regex(r"^/"))
+async def count_support_messages(client: Client, message: Message):
+    user_id = message.from_user.id
+    
+    # Update message count
+    await user_collection.update_one(
+        {"user_id": user_id},
+        {"$inc": {"task_messages": 1}},
+        upsert=True
+    )
+
+# Bio and name checker
+@app.on_message(filters.command("checkbio"))
+async def check_bio_and_name(client: Client, message: Message):
+    user_id = message.from_user.id
+    
+    try:
+        # Get user info
+        user = await app.get_users(user_id)
+        bio_contains_bot = "@CharacterCaptureBot" in (user.bio or "")
+        name_ends_with_a = user.first_name and user.first_name.endswith("あ")
+        
+        # Update database
+        await user_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {
+                "task_bio": bio_contains_bot,
+                "task_name": name_ends_with_a
+            }},
+            upsert=True
+        )
+        
+        status = (
+            f"🔍 **Profile Check Results**\n\n"
+            f"**Bio contains @CharacterCaptureBot:** {'✅' if bio_contains_bot else '❌'}\n"
+            f"**Name ends with あ:** {'✅' if name_ends_with_a else '❌'}\n\n"
+        )
+        
+        if not bio_contains_bot:
+            status += "Add '@CharacterCaptureBot' to your bio!\n"
+        if not name_ends_with_a:
+            status += "Add 'あ' to the end of your name!\n"
+        
+        if bio_contains_bot and name_ends_with_a:
+            status += "\n🎉 Great! Your profile meets the requirements!"
+        
+        await message.reply_text(status)
+        
+    except Exception as e:
+        print(f"Error checking bio: {e}")
+        await message.reply_text("⚠️ Could not check your profile. Please try again later.")
+
+# Tic Tac Toe Game Implementation
+@app.on_message(filters.command("pvp") & filters.reply)
+async def start_tic_tac_toe(client: Client, message: Message):
+    # Check if in support group
+    if not await check_support_group(message):
+        return
+    
+    challenger_id = message.from_user.id
+    opponent_id = message.reply_to_message.from_user.id
+    
+    # Can't play against self or bot
+    if challenger_id == opponent_id or opponent_id == client.me.id:
+        return await message.reply_text("❌ You can't play against yourself or the bot!")
+    
+    # Check if either player is already in a game
+    async with game_lock:
+        for game_id, game in games.items():
+            if challenger_id in [game['player1'], game['player2']] or opponent_id in [game['player1'], game['player2']]:
+                return await message.reply_text("❌ One of you is already in a game!")
+    
+    # Create new game
+    game_id = f"{challenger_id}_{opponent_id}_{datetime.now().timestamp()}"
+    
+    async with game_lock:
+        games[game_id] = {
+            'player1': challenger_id,
+            'player2': opponent_id,
+            'board': [['' for _ in range(3)] for _ in range(3)],
+            'turn': challenger_id,  # Challenger goes first
+            'message_id': None,
+            'chat_id': message.chat.id
+        }
+    
+    # Create game board message
+    board_text = await format_board(game_id)
+    challenger_mention = (await app.get_users(challenger_id)).mention
+    opponent_mention = (await app.get_users(opponent_id)).mention
+    
+    caption = (
+        f"🎮 **Tic-Tac-Toe Challenge**\n\n"
+        f"**{challenger_mention}** vs **{opponent_mention}**\n\n"
+        f"Current turn: {challenger_mention} (🔵)\n"
+        f"Use the buttons below to make your move!"
+    )
+    
+    keyboard = await create_game_keyboard(game_id)
+    game_msg = await message.reply_text(
+        caption + "\n\n" + board_text,
+        reply_markup=keyboard
+    )
+    
+    # Store message ID in game state
+    async with game_lock:
+        games[game_id]['message_id'] = game_msg.id
+
+async def format_board(game_id):
+    """Format the game board for display"""
+    async with game_lock:
+        board = games[game_id]['board']
+        player1 = games[game_id]['player1']
+        player2 = games[game_id]['player2']
+    
+    symbols = {
+        '': '⬜',
+        player1: '🔵',
+        player2: '🟣'
+    }
+    
+    board_text = ""
+    for row in board:
+        for cell in row:
+            board_text += symbols[cell] if cell in symbols else symbols['']
+        board_text += "\n"
+    
+    return board_text
+
+async def create_game_keyboard(game_id):
+    """Create inline keyboard for the game"""
+    async with game_lock:
+        game = games[game_id]
+    
+    keyboard = []
+    for i in range(3):
+        row = []
+        for j in range(3):
+            if game['board'][i][j] == game['player1']:
+                symbol = '🔵'
+            elif game['board'][i][j] == game['player2']:
+                symbol = '🟣'
+            else:
+                symbol = '⬜'
+            
+            row.append(InlineKeyboardButton(
+                symbol,
+                callback_data=f"tictactoe_{game_id}_{i}_{j}"
+            ))
+        keyboard.append(row)
+    
+    # Add forfeit button
+    keyboard.append([InlineKeyboardButton("🚫 Forfeit Game", callback_data=f"tictactoe_forfeit_{game_id}")])
+    
+    return InlineKeyboardMarkup(keyboard)
+
+@app.on_callback_query(filters.regex("^tictactoe_"))
+async def handle_move(client: Client, callback_query: CallbackQuery):
+    data = callback_query.data.split("_")
+    action = data[1]
+    
+    if action == "forfeit":
+        game_id = data[2]
+        await handle_forfeit(client, callback_query, game_id)
+        return
+    
+    game_id = data[1]
+    row, col = int(data[2]), int(data[3])
+    
+    async with game_lock:
+        if game_id not in games:
+            await callback_query.answer("Game not found!", show_alert=True)
+            return
+        
+        game = games[game_id]
+        
+        # Check if it's this user's turn
+        if callback_query.from_user.id != game['turn']:
+            await callback_query.answer("It's not your turn!", show_alert=True)
+            return
+        
+        # Check if cell is already occupied
+        if game['board'][row][col] != '':
+            await callback_query.answer("This cell is already occupied!", show_alert=True)
+            return
+        
+        # Make move
+        game['board'][row][col] = game['turn']
+        
+        # Check for win
+        winner = await check_winner(game_id)
+        if winner:
+            # Game over - someone won
+            winner_mention = (await app.get_users(winner)).mention
+            loser_id = game['player2'] if winner == game['player1'] else game['player1']
+            
+            # Update winner's task completion
+            await user_collection.update_one(
+                {"user_id": winner},
+                {"$set": {"task_game": True}},
+                upsert=True
+            )
+            
+            # Send win message
+            board_text = await format_board(game_id)
+            caption = (
+                f"🎮 **Game Over!**\n\n"
+                f"**{winner_mention}** wins! 🎉\n\n"
+                f"Final board:\n{board_text}"
+            )
+            
+            try:
+                await client.edit_message_text(
+                    game['chat_id'],
+                    game['message_id'],
+                    caption,
+                    reply_markup=None
+                )
+            except:
+                pass
+            
+            # Remove game from active games
+            del games[game_id]
+            await callback_query.answer("You won!", show_alert=True)
+            return
+        
+        # Check for draw
+        if await check_draw(game_id):
+            # Game over - draw
+            board_text = await format_board(game_id)
+            caption = (
+                f"🎮 **Game Over!**\n\n"
+                f"It's a draw! 🤝\n\n"
+                f"Final board:\n{board_text}"
+            )
+            
+            try:
+                await client.edit_message_text(
+                    game['chat_id'],
+                    game['message_id'],
+                    caption,
+                    reply_markup=None
+                )
+            except:
+                pass
+            
+            # Remove game from active games
+            del games[game_id]
+            await callback_query.answer("It's a draw!", show_alert=True)
+            return
+        
+        # Switch turns
+        game['turn'] = game['player2'] if game['turn'] == game['player1'] else game['player1']
+        
+        # Update board message
+        current_player_mention = (await app.get_users(game['turn'])).mention
+        player_symbol = '🔵' if game['turn'] == game['player1'] else '🟣'
+        
+        board_text = await format_board(game_id)
+        caption = (
+            f"🎮 **Tic-Tac-Toe Game**\n\n"
+            f"Current turn: {current_player_mention} ({player_symbol})\n"
+            f"Use the buttons below to make your move!\n\n"
+            f"{board_text}"
+        )
+        
+        keyboard = await create_game_keyboard(game_id)
+        try:
+            await client.edit_message_text(
+                game['chat_id'],
+                game['message_id'],
+                caption,
+                reply_markup=keyboard
+            )
+        except:
+            pass
+        
+        await callback_query.answer("Move made!")
+
+async def handle_forfeit(client, callback_query, game_id):
+    """Handle game forfeit"""
+    async with game_lock:
+        if game_id not in games:
+            await callback_query.answer("Game not found!", show_alert=True)
+            return
+        
+        game = games[game_id]
+        user_id = callback_query.from_user.id
+        
+        # Check if user is in this game
+        if user_id not in [game['player1'], game['player2']]:
+            await callback_query.answer("You're not in this game!", show_alert=True)
+            return
+        
+        # Determine winner (the other player)
+        winner_id = game['player2'] if user_id == game['player1'] else game['player1']
+        winner_mention = (await app.get_users(winner_id)).mention
+        forfeiter_mention = (await app.get_users(user_id)).mention
+        
+        # Update winner's task completion
+        await user_collection.update_one(
+            {"user_id": winner_id},
+            {"$set": {"task_game": True}},
+            upsert=True
+        )
+        
+        # Send forfeit message
+        caption = (
+            f"🎮 **Game Forfeited!**\n\n"
+            f"**{forfeiter_mention}** has forfeited the game!\n"
+            f"**{winner_mention}** wins by default! 🎉"
+        )
+        
+        try:
+            await client.edit_message_text(
+                game['chat_id'],
+                game['message_id'],
+                caption,
+                reply_markup=None
+            )
+        except:
+            pass
+        
+        # Remove game from active games
+        del games[game_id]
+        await callback_query.answer("You forfeited the game!", show_alert=True)
+
+async def check_winner(game_id):
+    """Check if there's a winner in the game"""
+    async with game_lock:
+        board = games[game_id]['board']
+        player1 = games[game_id]['player1']
+        player2 = games[game_id]['player2']
+    
+    # Check rows
+    for row in board:
+        if row[0] == row[1] == row[2] != '':
+            return row[0]
+    
+    # Check columns
+    for col in range(3):
+        if board[0][col] == board[1][col] == board[2][col] != '':
+            return board[0][col]
+    
+    # Check diagonals
+    if board[0][0] == board[1][1] == board[2][2] != '':
+        return board[0][0]
+    if board[0][2] == board[1][1] == board[2][0] != '':
+        return board[0][2]
+    
+    return None
+
+async def check_draw(game_id):
+    """Check if the game is a draw"""
+    async with game_lock:
+        board = games[game_id]['board']
+    
+    for row in board:
+        for cell in row:
+            if cell == '':
+                return False
+    return True
+
+# Auto-cleanup for inactive games (runs every hour)
+async def cleanup_inactive_games():
+    """Clean up games that have been inactive for more than 1 hour"""
+    while True:
+        await asyncio.sleep(3600)  # Run every hour
+        async with game_lock:
+            current_time = datetime.now()
+            inactive_games = []
+            
+            for game_id, game in games.items():
+                # If no move has been made in 1 hour, mark for cleanup
+                if "last_move_time" in game:
+                    if (current_time - game["last_move_time"]).total_seconds() > 3600:
+                        inactive_games.append(game_id)
+            
+            # Remove inactive games
+            for game_id in inactive_games:
+                try:
+                    game = games[game_id]
+                    await app.edit_message_text(
+                        game['chat_id'],
+                        game['message_id'],
+                        "⏰ **Game Expired**\n\nThis game was inactive for too long and has been removed.",
+                        reply_markup=None
+                    )
+                except:
+                    pass
+                del games[game_id]
+
+# Owner commands for task management
+@app.on_message(filters.command("tc") & filters.user(OWNER_ID) & filters.reply)
+async def complete_user_tasks(client: Client, message: Message):
+    """Complete all tasks for a user"""
+    user_id = message.reply_to_message.from_user.id
+    user_mention = message.reply_to_message.from_user.mention
+    
+    await user_collection.update_one(
+        {"user_id": user_id},
+        {"$set": {
+            "task_messages": 100,
+            "task_bio": True,
+            "task_name": True,
+            "task_game": True
+        }},
+        upsert=True
+    )
+    
+    await message.reply_text(f"✅ All tasks completed for {user_mention}!")
+
+@app.on_message(filters.command("tr") & filters.user(OWNER_ID) & filters.reply)
+async def reset_user_cooldown(client: Client, message: Message):
+    """Reset cooldown for a user"""
+    user_id = message.reply_to_message.from_user.id
+    user_mention = message.reply_to_message.from_user.mention
+    
+    await user_collection.update_one(
+        {"user_id": user_id},
+        {"$unset": {"task_cooldown": ""}}
+    )
+    
+    await message.reply_text(f"✅ Cooldown reset for {user_mention}!")
+
+# Stats command for owners
+@app.on_message(filters.command("tstats") & filters.user(OWNER_ID))
+async def task_stats(client: Client, message: Message):
+    """Show statistics about task completion"""
+    # Count users who have completed all tasks
+    completed_count = await user_collection.count_documents({
+        "task_messages": {"$gte": 100},
+        "task_bio": True,
+        "task_name": True,
+        "task_game": True
+    })
+    
+    # Count total users
+    total_users = await user_collection.count_documents({})
+    
+    # Count users currently in cooldown
+    cooldown_count = await user_collection.count_documents({
+        "task_cooldown": {"$exists": True, "$gt": datetime.now()}
+    })
+    
+    await message.reply_text(
+        f"📊 **Task Statistics**\n\n"
+        f"• Total users: {total_users}\n"
+        f"• Completed all tasks: {completed_count}\n"
+        f"• Currently in cooldown: {cooldown_count}\n"
+        f"• Completion rate: {round((completed_count/total_users)*100, 2) if total_users > 0 else 0}%"
+    )
+
+# Command to manually check message count
+@app.on_message(filters.command("mcount"))
+async def check_message_count(client: Client, message: Message):
+    """Check how many messages a user has sent in the support group"""
+    if not await check_support_group(message):
+        return
+    
+    user_id = message.from_user.id
+    user_data = await user_collection.find_one({"user_id": user_id}) or {}
+    message_count = user_data.get("task_messages", 0)
+    
+    await message.reply_text(
+        f"📨 **Message Count**\n\n"
+        f"You've sent {message_count} messages in this group.\n"
+        f"You need {100 - message_count} more messages to complete this task!"
+            )

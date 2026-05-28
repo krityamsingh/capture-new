@@ -1,0 +1,57 @@
+import datetime
+from pyrogram import Client, filters
+from pyrogram.types import Message
+from Grabber import application, user_collection  # Removed get_user_data import
+from . import app
+from .block import block_dec, temp_block, block_cbq
+
+# Function to fetch user data
+async def get_user_data(user_id):
+    return await user_collection.find_one({"user_id": user_id})  # Corrected
+
+# Function to check next claim time
+def get_next_claim_time(user_id, claim_type):
+    now = datetime.datetime.now()
+    claim_times = {
+        "daily": datetime.timedelta(days=1),
+        "weekly": datetime.timedelta(days=7),
+        "monthly": datetime.timedelta(days=30),
+    }
+
+    if user_id in user_claims.get(claim_type, {}):
+        last_claim = user_claims[claim_type][user_id]
+        next_claim = last_claim + claim_times[claim_type]
+        return max((next_claim - now), datetime.timedelta(0))
+    return datetime.timedelta(0)
+
+# Command Handler
+@app.on_message(filters.command("xprofile"))
+@block_dec
+async def xprofile(client, message: Message):
+    user_id = message.from_user.id
+    user_data = await get_user_data(user_id)
+
+    if not user_data:
+        await message.reply_text("❌ You don't have any profile data yet.")
+        return
+
+    # Get next claim times
+    daily_left = get_next_claim_time(user_id, "daily")
+    weekly_left = get_next_claim_time(user_id, "weekly")
+    monthly_left = get_next_claim_time(user_id, "monthly")
+
+    # Format response
+    response_text = (
+        f"🆔 **User Profile** 🆔\n\n"
+        f"👤 **Name:** `{message.from_user.first_name}`\n"
+        f"💰 **Coins:** `{user_data.get('coins', 0)}`\n"
+        f"🔮 **Shards:** `{user_data.get('shards', 0)}`\n"
+        f"📜 **Total Characters:** `{len(user_data.get('characters', []))}`\n\n"
+        f"🎁 **Upcoming Rewards:**\n"
+        f"🔹 **Daily:** `{daily_left}`\n"
+        f"🔹 **Weekly:** `{weekly_left}`\n"
+        f"🔹 **Monthly:** `{monthly_left}`\n\n"
+        f"💡 Use `/daily`, `/weekly`, or `/monthly` to claim rewards!"
+    )
+
+    await message.reply_text(response_text)

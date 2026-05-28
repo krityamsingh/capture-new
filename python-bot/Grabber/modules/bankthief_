@@ -1,0 +1,416 @@
+import random
+import asyncio
+from datetime import datetime, timedelta
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from . import Grabberu as app, user_collection
+
+# Enhanced bank list with real-world and anime banks
+REAL_WORLD_BANKS = {
+    "🏦 Federal Reserve Vault": {
+        "difficulty": "Extreme",
+        "security": "Military-Grade",
+        "min_reward": 25000,
+        "max_reward": 100000,
+        "failure_rate": 80,
+        "penalty_multiplier": 2.5
+    },
+    "💰 Bank of England Gold Vault": {
+        "difficulty": "Hard",
+        "security": "Armed Guards",
+        "min_reward": 15000,
+        "max_reward": 75000,
+        "failure_rate": 65,
+        "penalty_multiplier": 2.0
+    },
+    "🏛️ Fort Knox Gold Reserve": {
+        "difficulty": "Very Hard",
+        "security": "Tanks & Drones",
+        "min_reward": 20000,
+        "max_reward": 90000,
+        "failure_rate": 75,
+        "penalty_multiplier": 3.0
+    },
+    "🏯 Swiss Bank Vault": {
+        "difficulty": "Medium",
+        "security": "Laser Grids",
+        "min_reward": 10000,
+        "max_reward": 50000,
+        "failure_rate": 50,
+        "penalty_multiplier": 1.5
+    },
+    "🌌 Dubai Royal Bank": {
+        "difficulty": "Easy",
+        "security": "Private Security",
+        "min_reward": 5000,
+        "max_reward": 25000,
+        "failure_rate": 35,
+        "penalty_multiplier": 1.0
+    }
+}
+
+ANIME_BANKS = {
+    "🐉 Goku's Dragon Ball Vault": {
+        "difficulty": "Mythical",
+        "security": "Shenron Guardian",
+        "min_reward": 50000,
+        "max_reward": 200000,
+        "failure_rate": 85,
+        "penalty_multiplier": 4.0,
+        "special": "Dragon Balls"
+    },
+    "⚡ Raikage's Gold Reserve": {
+        "difficulty": "Very Hard",
+        "security": "Lightning Ninjas",
+        "min_reward": 30000,
+        "max_reward": 120000,
+        "failure_rate": 70,
+        "penalty_multiplier": 2.5
+    },
+    "👑 One Piece Treasure Vault": {
+        "difficulty": "Legendary",
+        "security": "Marine Admirals",
+        "min_reward": 75000,
+        "max_reward": 300000,
+        "failure_rate": 90,
+        "penalty_multiplier": 5.0,
+        "special": "Ancient Weapons"
+    },
+    "🌀 Akatsuki Hideout Treasury": {
+        "difficulty": "Hard",
+        "security": "S-Class Criminals",
+        "min_reward": 20000,
+        "max_reward": 100000,
+        "failure_rate": 65,
+        "penalty_multiplier": 2.0
+    },
+    "🔮 Fairy Tail Guild Bank": {
+        "difficulty": "Medium",
+        "security": "S-Class Wizards",
+        "min_reward": 15000,
+        "max_reward": 75000,
+        "failure_rate": 55,
+        "penalty_multiplier": 1.5
+    }
+}
+
+HIDEOUTS = {
+    "success": [
+        "🏰 **Batcave** (DC Comics)",
+        "🌑 **Death Star** (Star Wars)",
+        "🏯 **Uchiha Hideout** (Naruto)",
+        "🚀 **Beerus' Planet** (Dragon Ball)",
+        "🌌 **Soul Society** (Bleach)",
+        "⚓ **Thousand Sunny** (One Piece)",
+        "🔮 **Magnolia Town** (Fairy Tail)"
+    ],
+    "failure": [
+        "🚔 **Gotham Police Department** (Batman)",
+        "🔒 **Azkaban Prison** (Harry Potter)",
+        "⛓️ **Impel Down** (One Piece)",
+        "⚡ **Hidden Cloud Prison** (Naruto)",
+        "🕸️ **Ryūtsu Penitentiary** (My Hero Academia)"
+    ]
+}
+
+HEIST_EQUIPMENT = {
+    "🛠️ Basic Tools": {"cost": 1000, "success_boost": 5},
+    "🔫 Handgun": {"cost": 2500, "success_boost": 10},
+    "💣 Explosives": {"cost": 5000, "success_boost": 15},
+    "👨‍💻 Hacker Device": {"cost": 7500, "success_boost": 20},
+    "🦹‍♂️ Supervillain Tech": {"cost": 15000, "success_boost": 30},
+    "🔮 Magic Artifact": {"cost": 20000, "success_boost": 40}
+}
+
+RUNNING_GIFS = [
+    "https://media.giphy.com/media/L0aXyZvLOJ6pDmUg2V/giphy.gif",
+    "https://media.giphy.com/media/3o7aD2d7hy9ktXNDP2/giphy.gif",
+    "https://media.giphy.com/media/3o7TKsQ8UQ1h3nDqWQ/giphy.gif"
+]
+
+SUCCESS_GIFS = [
+    "https://media.giphy.com/media/VbnUQpnihPSIgIXuZv/giphy.gif",
+    "https://media.giphy.com/media/3o7abldj0b3rxrZUxW/giphy.gif",
+    "https://media.giphy.com/media/26tP3M3i03hoIYL6M/giphy.gif"
+]
+
+FAILURE_GIFS = [
+    "https://media.giphy.com/media/l0HU7JI1nzKC7Kk5O/giphy.gif",
+    "https://media.giphy.com/media/3o7TKsQ8UQ1h3nDqWQ/giphy.gif",
+    "https://media.giphy.com/media/3o7aD2d7hy9ktXNDP2/giphy.gif"
+]
+
+@app.on_message(filters.command(["bankthief", "heist"]))
+async def bank_thief_menu(client: Client, message: Message):
+    user_id = message.from_user.id
+    user_data = await user_collection.find_one({'id': user_id}, projection={'balance': 1})
+    
+    balance = int(user_data.get("balance", 0))
+
+    if balance < 5000:
+        return await message.reply_text(
+            "💢 **Insufficient Funds!**\n"
+            "You need at least **5,000 coins** to attempt a heist!\n\n"
+            "🔫 *Tip: Try smaller crimes first to build your criminal empire!*"
+        )
+
+    bank_types = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🌍 Real World Banks", callback_data="banktype_real")],
+        [InlineKeyboardButton("🎌 Anime Banks", callback_data="banktype_anime")],
+        [InlineKeyboardButton("🛠️ Heist Equipment Shop", callback_data="heist_shop")]
+    ])
+    
+    await message.reply_text(
+        "👤 **CRIMINAL PROFILE**\n"
+        f"💰 Balance: **{balance:,} coins**\n\n"
+        "🌐 **Select Bank Type:**",
+        reply_markup=bank_types
+    )
+
+@app.on_callback_query(filters.regex("^banktype_"))
+async def select_bank_type(client, callback_query):
+    bank_type = callback_query.data.split("_")[1]
+    
+    if bank_type == "real":
+        banks = REAL_WORLD_BANKS
+        title = "🌍 REAL WORLD BANKS"
+    else:
+        banks = ANIME_BANKS
+        title = "🎌 ANIME BANKS"
+
+    bank_buttons = []
+    temp_row = []
+    for i, (bank_name, bank_data) in enumerate(banks.items()):
+        btn_text = f"{bank_name} | {bank_data['difficulty']}"
+        temp_row.append(InlineKeyboardButton(btn_text, callback_data=f"selectbank_{bank_type}_{i}"))
+        if len(temp_row) == 2:
+            bank_buttons.append(temp_row)
+            temp_row = []
+    if temp_row:
+        bank_buttons.append(temp_row)
+
+    bank_buttons.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")])
+
+    await callback_query.message.edit_text(
+        f"🏦 **{title}**\n\n"
+        "🔐 *Difficulty Levels:*\n"
+        "🟢 Easy | 🟡 Medium | 🟠 Hard | 🔴 Very Hard | 🟣 Extreme | ⚫ Legendary\n\n"
+        "Select a target:",
+        reply_markup=InlineKeyboardMarkup(bank_buttons)
+    )
+
+@app.on_callback_query(filters.regex("^selectbank_"))
+async def confirm_heist(client, callback_query):
+    data_parts = callback_query.data.split("_")
+    bank_type = data_parts[1]
+    bank_index = int(data_parts[2])
+    
+    banks = REAL_WORLD_BANKS if bank_type == "real" else ANIME_BANKS
+    bank_name = list(banks.keys())[bank_index]
+    bank_data = list(banks.values())[bank_index]
+
+    # Check if user has equipment
+    user_id = callback_query.from_user.id
+    user_data = await user_collection.find_one({'id': user_id}, projection={'heist_equipment': 1})
+    equipment = user_data.get("heist_equipment", "🛠️ Basic Tools")
+    success_boost = HEIST_EQUIPMENT.get(equipment, {}).get("success_boost", 0)
+
+    adjusted_failure_rate = max(5, bank_data["failure_rate"] - success_boost)
+    
+    confirm_buttons = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Confirm Heist", callback_data=f"startheist_{bank_type}_{bank_index}")],
+        [InlineKeyboardButton("🛠️ Change Equipment", callback_data="heist_shop")],
+        [InlineKeyboardButton("🔙 Back", callback_data=f"banktype_{bank_type}")]
+    ])
+
+    await callback_query.message.edit_text(
+        f"🔍 **HEIST INTEL REPORT**\n\n"
+        f"🏦 Target: {bank_name}\n"
+        f"🛡️ Security: {bank_data['security']}\n"
+        f"🎯 Difficulty: {bank_data['difficulty']}\n"
+        f"📉 Success Chance: {100 - adjusted_failure_rate}%\n"
+        f"💰 Potential Loot: {bank_data['min_reward']:,} - {bank_data['max_reward']:,} coins\n"
+        f"💀 Failure Penalty: {int(bank_data['min_reward'] * bank_data['penalty_multiplier']):,} coins\n\n"
+        f"🛠️ Current Equipment: {equipment} (+{success_boost}% success)\n\n"
+        "⚠️ *This operation is highly dangerous. Proceed with caution.*",
+        reply_markup=confirm_buttons
+    )
+
+@app.on_callback_query(filters.regex("^startheist_"))
+async def execute_heist(client, callback_query):
+    user_id = callback_query.from_user.id
+    user_data = await user_collection.find_one({'id': user_id})
+    
+    if not user_data:
+        return await callback_query.answer("User data not found!", show_alert=True)
+
+    data_parts = callback_query.data.split("_")
+    bank_type = data_parts[1]
+    bank_index = int(data_parts[2])
+    
+    banks = REAL_WORLD_BANKS if bank_type == "real" else ANIME_BANKS
+    bank_name = list(banks.keys())[bank_index]
+    bank_data = list(banks.values())[bank_index]
+
+    # Get equipment boost
+    equipment = user_data.get("heist_equipment", "🛠️ Basic Tools")
+    success_boost = HEIST_EQUIPMENT.get(equipment, {}).get("success_boost", 0)
+    adjusted_failure_rate = max(5, bank_data["failure_rate"] - success_boost)
+
+    # Ensure balance is integer
+    user_balance = int(user_data.get("balance", 0))
+
+    # Check if user has enough balance for potential penalty
+    min_penalty = int(bank_data["min_reward"] * bank_data["penalty_multiplier"])
+    if user_balance < min_penalty:
+        return await callback_query.answer(
+            f"You need at least {min_penalty:,} coins to cover potential penalties!",
+            show_alert=True
+        )
+
+    # Delete previous message
+    await callback_query.message.delete()
+
+    # Heist preparation message
+    prep_msg = await callback_query.message.reply_text(
+        f"🕵️‍♂️ **{callback_query.from_user.first_name}** is preparing to rob **{bank_name}**...\n\n"
+        f"🔧 Equipment: {equipment}\n"
+        f"🎯 Success Chance: {100 - adjusted_failure_rate}%\n"
+        "⚡ *Gathering crew and equipment...*"
+    )
+
+    await asyncio.sleep(2)
+
+    # Running animation
+    running_gif = random.choice(RUNNING_GIFS)
+    running_msg = await prep_msg.reply_animation(
+        running_gif,
+        caption=f"🏃‍♂️ **BREAKING NEWS**\n\n{callback_query.from_user.first_name} is attempting to rob {bank_name}!\n\n"
+                f"🚨 {bank_data['security']} on high alert!"
+    )
+
+    await asyncio.sleep(4)
+
+    # Determine heist outcome
+    heist_success = random.randint(1, 100) > adjusted_failure_rate
+    loot_amount = random.randint(bank_data["min_reward"], bank_data["max_reward"])
+    penalty_amount = int(loot_amount * bank_data["penalty_multiplier"])
+
+    # Delete running message
+    await running_msg.delete()
+
+    if heist_success:
+        # Successful heist
+        success_gif = random.choice(SUCCESS_GIFS)
+        hideout = random.choice(HIDEOUTS["success"])
+        
+        caption = (
+            f"🎉 **HEIST SUCCESS!**\n\n"
+            f"💰 **{callback_query.from_user.first_name}** stole **{loot_amount:,} coins** from {bank_name}!\n"
+            f"🏃‍♂️ Escaped to {hideout}\n\n"
+            f"🔫 *Your criminal reputation grows...*"
+        )
+        
+        if "special" in bank_data:
+            caption += f"\n\n✨ **Bonus:** Found {bank_data['special']}!"
+            loot_amount = int(loot_amount * 1.5)
+
+        result_msg = await prep_msg.reply_animation(
+            success_gif,
+            caption=caption
+        )
+        
+        # Update user balance
+        await user_collection.update_one(
+            {'id': user_id},
+            {"$inc": {"balance": loot_amount}, "$inc": {"heists_completed": 1}}
+        )
+    else:
+        # Failed heist
+        failure_gif = random.choice(FAILURE_GIFS)
+        prison = random.choice(HIDEOUTS["failure"])
+        
+        actual_penalty = min(penalty_amount, user_balance)
+        
+        caption = (
+            f"🚨 **HEIST FAILED!**\n\n"
+            f"👮 **{callback_query.from_user.first_name}** was caught by {bank_data['security']}!\n"
+            f"💸 Penalty: **{actual_penalty:,} coins**\n"
+            f"🔒 Now imprisoned in {prison}\n\n"
+            f"💀 *Better luck next time...*"
+        )
+        
+        result_msg = await prep_msg.reply_animation(
+            failure_gif,
+            caption=caption
+        )
+        
+        # Update user balance and prison time
+        prison_time = datetime.now() + timedelta(hours=2)
+        await user_collection.update_one(
+            {'id': user_id},
+            {"$inc": {"balance": -actual_penalty}, "$set": {"in_prison_until": prison_time}}
+        )
+
+    # Add cooldown
+    cooldown_time = datetime.now() + timedelta(minutes=30)
+    await user_collection.update_one(
+        {'id': user_id},
+        {"$set": {"heist_cooldown": cooldown_time}}
+    )
+
+    await prep_msg.delete()
+
+@app.on_callback_query(filters.regex("^heist_shop$"))
+async def heist_equipment_shop(client, callback_query):
+    user_id = callback_query.from_user.id
+    user_data = await user_collection.find_one({'id': user_id}, projection={'balance': 1})
+    balance = user_data.get("balance", 0)
+
+    equipment_buttons = []
+    for eq_name, eq_data in HEIST_EQUIPMENT.items():
+        afford = "✅" if balance >= eq_data["cost"] else "❌"
+        btn_text = f"{eq_name} - {eq_data['cost']:,} coins {afford}"
+        equipment_buttons.append(
+            [InlineKeyboardButton(btn_text, callback_data=f"buyequip_{eq_name}")]
+        )
+
+    equipment_buttons.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")])
+
+    await callback_query.message.edit_text(
+        "🛠️ **HEIST EQUIPMENT SHOP**\n\n"
+        "Better equipment increases your success chance:\n\n"
+        "🔫 Firearms: +10-15%\n"
+        "💻 Tech: +20-30%\n"
+        "🔮 Magic: +40%\n\n"
+        "Current Balance: {balance:,} coins",
+        reply_markup=InlineKeyboardMarkup(equipment_buttons)
+    )
+
+@app.on_callback_query(filters.regex("^buyequip_"))
+async def buy_equipment(client, callback_query):
+    user_id = callback_query.from_user.id
+    equipment_name = callback_query.data.split("_", 1)[1]
+    
+    if equipment_name not in HEIST_EQUIPMENT:
+        return await callback_query.answer("Invalid equipment!", show_alert=True)
+
+    eq_data = HEIST_EQUIPMENT[equipment_name]
+    
+    # Check user balance
+    user_data = await user_collection.find_one({'id': user_id}, projection={'balance': 1})
+    if user_data["balance"] < eq_data["cost"]:
+        return await callback_query.answer("Not enough coins!", show_alert=True)
+
+    # Update user equipment
+    await user_collection.update_one(
+        {'id': user_id},
+        {"$set": {"heist_equipment": equipment_name}, "$inc": {"balance": -eq_data["cost"]}}
+    )
+
+    await callback_query.answer(f"Purchased {equipment_name}!", show_alert=True)
+    await heist_equipment_shop(client, callback_query)
+
+@app.on_callback_query(filters.regex("^back_to_menu$"))
+async def back_to_menu(client, callback_query):
+    await bank_thief_menu(client, callback_query.message)

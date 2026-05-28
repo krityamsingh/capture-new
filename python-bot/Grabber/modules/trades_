@@ -1,0 +1,353 @@
+from pyrogram import Client, filters
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from Grabber import user_collection, app
+from .block import block_dec_ptb
+import asyncio
+
+pending_trades = {}
+outgoing_trades = {}
+
+@block_dec_ptb
+@app.on_message(filters.command("trade"))
+async def trade(client: Client, message: Message):
+    try:
+        sender_id = message.from_user.id
+        
+        if not message.reply_to_message:
+            await message.reply_text("**ʏᴏᴜ ɴᴇᴇᴅ ᴛᴏ ʀᴇᴘʟʏ ᴛᴏ ᴀ ᴜsᴇʀ's ᴍᴇssᴀɢᴇ ᴛᴏ ᴛʀᴀᴅᴇ ᴀ ᴄʜᴀʀᴀᴄᴛᴇʀ!**")
+            return
+        
+        receiver_id = message.reply_to_message.from_user.id
+        
+        if sender_id == receiver_id:
+            await message.reply_text("**ʏᴏᴜ ᴄᴀɴ'ᴛ ᴛʀᴀᴅᴇ ᴀ ᴄʜᴀʀᴀᴄᴛᴇʀ ᴡɪᴛʜ ʏᴏᴜʀsᴇʟғ!**")
+            return
+        
+        if len(message.command) != 3:
+            await message.reply_text("**ʏᴏᴜ ɴᴇᴇᴅ ᴛᴏ ᴘʀᴏᴠɪᴅᴇ ᴛᴡᴏ ᴄʜᴀʀᴀᴄᴛᴇʀ ɪᴅs!**\n\nᴇxᴀᴍᴘʟᴇ: `/ᴛʀᴀᴅᴇ 𝟷𝟸𝟹 𝟺𝟻𝟼`")
+            return
+        
+        sender_char_id, receiver_char_id = message.command[1], message.command[2]
+        
+        # Validate character IDs are numeric
+        if not sender_char_id.isdigit() or not receiver_char_id.isdigit():
+            await message.reply_text("**ɪɴᴠᴀʟɪᴅ ᴄʜᴀʀᴀᴄᴛᴇʀ ɪᴅs! ᴘʟᴇᴀsᴇ ᴜsᴇ ɴᴜᴍᴇʀɪᴄ ɪᴅs.**")
+            return
+        
+        sender = await user_collection.find_one({'id': sender_id})
+        receiver = await user_collection.find_one({'id': receiver_id})
+        
+        if not sender or 'characters' not in sender:
+            await message.reply_text("**ʏᴏᴜ ᴅᴏɴ'ᴛ ʜᴀᴠᴇ ᴀɴʏ ᴄʜᴀʀᴀᴄᴛᴇʀs ᴛᴏ ᴛʀᴀᴅᴇ!**")
+            return
+        
+        if not receiver or 'characters' not in receiver:
+            await message.reply_text("**ᴛʜᴇ ᴏᴛʜᴇʀ ᴜsᴇʀ ᴅᴏᴇsɴ'ᴛ ʜᴀᴠᴇ ᴀɴʏ ᴄʜᴀʀᴀᴄᴛᴇʀs!**")
+            return
+        
+        # Check if characters are already in pending trades
+        for trade_id, trade_data in pending_trades.items():
+            if (str(trade_data['sender_char']['id']) == sender_char_id and trade_data['sender_id'] == sender_id):
+                await message.reply_text("**ᴛʜɪs ᴄʜᴀʀᴀᴄᴛᴇʀ ɪs ᴀʟʀᴇᴀᴅʏ ɪɴ ᴀ ᴘᴇɴᴅɪɴɢ ᴛʀᴀᴅᴇ!**")
+                return
+            if (str(trade_data['receiver_char']['id']) == receiver_char_id and trade_data['receiver_id'] == receiver_id):
+                await message.reply_text("**ᴛʜᴇ ᴏᴛʜᴇʀ ᴜsᴇʀ's ᴄʜᴀʀᴀᴄᴛᴇʀ ɪs ᴀʟʀᴇᴀᴅʏ ɪɴ ᴀ ᴘᴇɴᴅɪɴɢ ᴛʀᴀᴅᴇ!**")
+                return
+        
+        # Find characters with proper error handling
+        sender_char = None
+        for char in sender['characters']:
+            if str(char.get('id')) == sender_char_id:
+                sender_char = char
+                break
+                
+        receiver_char = None
+        for char in receiver['characters']:
+            if str(char.get('id')) == receiver_char_id:
+                receiver_char = char
+                break
+        
+        if not sender_char:
+            await message.reply_text("**ʏᴏᴜ ᴅᴏɴ'ᴛ ʜᴀᴠᴇ ᴛʜᴇ ᴄʜᴀʀᴀᴄᴛᴇʀ ʏᴏᴜ'ʀᴇ ᴛʀʏɪɴɢ ᴛᴏ ᴛʀᴀᴅᴇ!**")
+            return
+        
+        if not receiver_char:
+            await message.reply_text("**ᴛʜᴇ ᴏᴛʜᴇʀ ᴜsᴇʀ ᴅᴏᴇsɴ'ᴛ ʜᴀᴠᴇ ᴛʜᴇ ᴄʜᴀʀᴀᴄᴛᴇʀ ᴛʜᴇʏ'ʀᴇ ᴛʀʏɪɴɢ ᴛᴏ ᴛʀᴀᴅᴇ!**")
+            return
+        
+        # Store trade info
+        trade_id = f"{sender_id}_{receiver_id}_{message.id}"
+        pending_trades[trade_id] = {
+            'sender_id': sender_id,
+            'receiver_id': receiver_id,
+            'sender_char': sender_char,
+            'receiver_char': receiver_char,
+            'message_id': message.id,
+            'status': 'pending'
+        }
+        
+        # Store outgoing trade
+        if sender_id not in outgoing_trades:
+            outgoing_trades[sender_id] = []
+        outgoing_trades[sender_id].append(trade_id)
+        
+        # Prepare trade info message
+        sender_name = message.from_user.first_name
+        receiver_name = message.reply_to_message.from_user.first_name
+        
+        trade_info = f"""
+**✨ ᴛʀᴀᴅᴇ ʀᴇǫᴜᴇsᴛ ✨**
+
+**• sᴇɴᴅᴇʀ:** [{sender_name}](tg://user?id={sender_id})
+**• ʀᴇᴄᴇɪᴠᴇʀ:** [{receiver_name}](tg://user?id={receiver_id})
+
+**🔄 ᴛʀᴀᴅᴇ ᴅᴇᴛᴀɪʟs:**
+{sender_name}'s ᴄʜᴀʀᴀᴄᴛᴇʀ:
+➥ ɪᴅ: `{sender_char.get('id', 'N/A')}`
+➥ ɴᴀᴍᴇ: {sender_char.get('name', 'N/A')}
+➥ ʀᴀʀɪᴛʏ: {sender_char.get('rarity', 'N/A')}
+
+{receiver_name}'s ᴄʜᴀʀᴀᴄᴛᴇʀ:
+➥ ɪᴅ: `{receiver_char.get('id', 'N/A')}`
+➥ ɴᴀᴍᴇ: {receiver_char.get('name', 'N/A')}
+➥ ʀᴀʀɪᴛʏ: {receiver_char.get('rarity', 'N/A')}
+
+**ᴏɴʟʏ {receiver_name} ᴄᴀɴ ᴀᴄᴄᴇᴘᴛ ᴛʜɪs ᴛʀᴀᴅᴇ!**
+"""
+        
+        # Prepare media from sender's character
+        media = None
+        media_type = None
+        
+        if 'video_url' in sender_char and sender_char['video_url']:
+            media = sender_char['video_url']
+            media_type = 'video'
+        elif 'img_url' in sender_char and sender_char['img_url']:
+            media = sender_char['img_url']
+            media_type = 'photo'
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ ᴀᴄᴄᴇᴘᴛ ᴛʀᴀᴅᴇ", callback_data=f"confirm_{trade_id}"),
+             InlineKeyboardButton("❌ ᴅᴇɴʏ ᴛʀᴀᴅᴇ", callback_data=f"cancel_{trade_id}")]
+        ])
+        
+        try:
+            # Send the trade request as a reply to the receiver's message
+            if media:
+                if media_type == 'video':
+                    sent_msg = await client.send_video(
+                        chat_id=message.chat.id,
+                        video=media,
+                        caption=trade_info,
+                        reply_to_message_id=message.reply_to_message.id,
+                        reply_markup=keyboard
+                    )
+                else:
+                    sent_msg = await client.send_photo(
+                        chat_id=message.chat.id,
+                        photo=media,
+                        caption=trade_info,
+                        reply_to_message_id=message.reply_to_message.id,
+                        reply_markup=keyboard
+                    )
+            else:
+                sent_msg = await client.send_message(
+                    chat_id=message.chat.id,
+                    text=trade_info,
+                    reply_to_message_id=message.reply_to_message.id,
+                    reply_markup=keyboard
+                )
+            
+            # Update trade data with the new message ID
+            pending_trades[trade_id]['message_id'] = sent_msg.id
+            
+        except Exception as e:
+            print(f"Error sending trade request: {e}")
+            await message.reply_text("**ғᴀɪʟᴇᴅ ᴛᴏ sᴇɴᴅ ᴛʀᴀᴅᴇ ʀᴇǫᴜᴇsᴛ!**")
+            
+    except Exception as e:
+        print(f"Error in trade command: {e}")
+        await message.reply_text("**ᴀɴ ᴇʀʀᴏʀ ᴏᴄᴄᴜʀʀᴇᴅ ᴡʜɪʟᴇ ᴘʀᴏᴄᴇssɪɴɢ ʏᴏᴜʀ ᴛʀᴀᴅᴇ ʀᴇǫᴜᴇsᴛ!**")
+
+@app.on_callback_query(filters.regex(r"^confirm_"))
+async def confirm_trade(client, callback_query):
+    try:
+        trade_id = callback_query.data.split("_", 1)[1]
+        
+        trade_data = pending_trades[trade_id]
+        
+        if callback_query.from_user.id != trade_data['receiver_id']:
+            await callback_query.answer("ᴛʜɪs ᴛʀᴀᴅᴇ ʀᴇǫᴜᴇsᴛ ɪs ɴᴏᴛ ғᴏʀ ʏᴏᴜ!", show_alert=True)
+            return
+        
+        if trade_data['status'] != 'pending':
+            await callback_query.answer("ᴛʜɪs ᴛʀᴀᴅᴇ ʜᴀs ᴀʟʀᴇᴀᴅʏ ʙᴇᴇɴ ᴘʀᴏᴄᴇssᴇᴅ!", show_alert=True)
+            return
+        
+        sender = await user_collection.find_one({'id': trade_data['sender_id']})
+        receiver = await user_collection.find_one({'id': trade_data['receiver_id']})
+        
+        if not sender or not receiver:
+            await callback_query.answer("ᴏɴᴇ ᴏʀ ʙᴏᴛʜ ᴜsᴇʀs ɴᴏᴛ ғᴏᴜɴᴅ ɪɴ ᴅᴀᴛᴀʙᴀsᴇ!", show_alert=True)
+            return
+        
+        # Verify characters still exist before processing
+        sender_char_exists = any(str(c.get('id')) == str(trade_data['sender_char'].get('id')) for c in sender['characters'])
+        receiver_char_exists = any(str(c.get('id')) == str(trade_data['receiver_char'].get('id')) for c in receiver['characters'])
+        
+        if not sender_char_exists:
+            await callback_query.answer("sᴇɴᴅᴇʀ ɴᴏ ʟᴏɴɢᴇʀ ʜᴀs ᴛʜᴇ ᴄʜᴀʀᴀᴄᴛᴇʀ!", show_alert=True)
+            return
+        
+        if not receiver_char_exists:
+            await callback_query.answer("ʏᴏᴜ ɴᴏ ʟᴏɴɢᴇʀ ʜᴀᴠᴇ ᴛʜᴇ ᴄʜᴀʀᴀᴄᴛᴇʀ!", show_alert=True)
+            return
+        
+        # Remove only one instance of each character (fix for the bug)
+        # For sender's character
+        sender_char_removed = False
+        new_sender_chars = []
+        for char in sender['characters']:
+            if not sender_char_removed and str(char.get('id')) == str(trade_data['sender_char'].get('id')):
+                sender_char_removed = True
+                continue
+            new_sender_chars.append(char)
+        
+        # For receiver's character
+        receiver_char_removed = False
+        new_receiver_chars = []
+        for char in receiver['characters']:
+            if not receiver_char_removed and str(char.get('id')) == str(trade_data['receiver_char'].get('id')):
+                receiver_char_removed = False
+                continue
+            new_receiver_chars.append(char)
+        
+        # Add traded characters
+        new_sender_chars.append(trade_data['receiver_char'])
+        new_receiver_chars.append(trade_data['sender_char'])
+        
+        # Update database
+        await user_collection.update_one({'id': trade_data['sender_id']}, {'$set': {'characters': new_sender_chars}})
+        await user_collection.update_one({'id': trade_data['receiver_id']}, {'$set': {'characters': new_receiver_chars}})
+        
+        # Mark trade as completed
+        pending_trades[trade_id]['status'] = 'completed'
+        
+        # Clean up
+        if trade_data['sender_id'] in outgoing_trades and trade_id in outgoing_trades[trade_data['sender_id']]:
+            outgoing_trades[trade_data['sender_id']].remove(trade_id)
+        
+        # Notify both users
+        sender_name = (await client.get_users(trade_data['sender_id'])).first_name
+        receiver_name = callback_query.from_user.first_name
+        
+        success_msg = f"""
+**🎉 ᴛʀᴀᴅᴇ sᴜᴄᴄᴇssғᴜʟ!**
+
+**• {sender_name}** ʀᴇᴄᴇɪᴠᴇᴅ: {trade_data['receiver_char'].get('name', 'Unknown')}
+**• {receiver_name}** ʀᴇᴄᴇɪᴠᴇᴅ: {trade_data['sender_char'].get('name', 'Unknown')}
+
+**ʜᴀᴘᴘʏ ɢᴀᴍɪɴɢ!** 🎮
+"""
+        
+        await callback_query.message.edit_text(success_msg)
+        await callback_query.answer("ᴛʀᴀᴅᴇ ᴄᴏᴍᴘʟᴇᴛᴇᴅ sᴜᴄᴄᴇssғᴜʟʟʏ!", show_alert=True)
+        
+    except Exception as e:
+        print(f"Error in confirm trade: {e}")
+        await callback_query.answer("ᴀɴ ᴇʀʀᴏʀ ᴏᴄᴄᴜʀʀᴇᴅ ᴡʜɪʟᴇ ᴘʀᴏᴄᴇssɪɴɢ ᴛʀᴀᴅᴇ!", show_alert=True)
+
+@app.on_callback_query(filters.regex(r"^cancel_"))
+async def cancel_trade(client, callback_query):
+    try:
+        trade_id = callback_query.data.split("_", 1)[1]
+        
+        trade_data = pending_trades[trade_id]
+        
+        if callback_query.from_user.id != trade_data['receiver_id']:
+            await callback_query.answer("ᴛʜɪs ᴛʀᴀᴅᴇ ʀᴇǫᴜᴇsᴛ ɪs ɴᴏᴛ ғᴏʀ ʏᴏᴜ!", show_alert=True)
+            return
+        
+        # Mark trade as cancelled
+        pending_trades[trade_id]['status'] = 'cancelled'
+        
+        # Clean up
+        if trade_data['sender_id'] in outgoing_trades and trade_id in outgoing_trades[trade_data['sender_id']]:
+            outgoing_trades[trade_data['sender_id']].remove(trade_id)
+        
+        await callback_query.message.edit_text("**❌ ᴛʀᴀᴅᴇ ᴄᴀɴᴄᴇʟʟᴇᴅ ʙʏ ᴜsᴇʀ.**")
+        await callback_query.answer("ᴛʀᴀᴅᴇ ᴄᴀɴᴄᴇʟʟᴇᴅ", show_alert=True)
+        
+    except Exception as e:
+        print(f"Error in cancel trade: {e}")
+        await callback_query.answer("ᴀɴ ᴇʀʀᴏʀ ᴏᴄᴄᴜʀʀᴇᴅ ᴡʜɪʟᴇ ᴄᴀɴᴄᴇʟʟɪɴɢ ᴛʀᴀᴅᴇ!", show_alert=True)
+
+@app.on_message(filters.command("ctrade"))
+async def cancel_outgoing_trades(client, message):
+    try:
+        user_id = message.from_user.id
+        
+        if user_id not in outgoing_trades or not outgoing_trades[user_id]:
+            await message.reply_text("**ʏᴏᴜ ᴅᴏɴ'ᴛ ʜᴀᴠᴇ ᴀɴʏ ᴏᴜᴛɢᴏɪɴɢ ᴛʀᴀᴅᴇs!**")
+            return
+        
+        keyboard = []
+        valid_trades = []
+        
+        for trade_id in outgoing_trades[user_id]:
+            if trade_id in pending_trades and pending_trades[trade_id]['status'] == 'pending':
+                trade_data = pending_trades[trade_id]
+                receiver_name = (await client.get_users(trade_data['receiver_id'])).first_name
+                btn_text = f"❌ ᴄᴀɴᴄᴇʟ ᴛʀᴀᴅᴇ ᴡɪᴛʜ {receiver_name}"
+                keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"ocancel_{trade_id}")])
+                valid_trades.append(trade_id)
+        
+        if not valid_trades:
+            outgoing_trades[user_id] = []
+            await message.reply_text("**ʏᴏᴜ ᴅᴏɴ'ᴛ ʜᴀᴠᴇ ᴀɴʏ ᴏᴜᴛɢᴏɪɴɢ ᴛʀᴀᴅᴇs!**")
+            return
+        
+        keyboard.append([InlineKeyboardButton("🚫 ᴄᴀɴᴄᴇʟ ᴀʟʟ", callback_data="ocancel_all")])
+        
+        await message.reply_text(
+            "**📤 ʏᴏᴜʀ ᴏᴜᴛɢᴏɪɴɢ ᴛʀᴀᴅᴇs:**",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+    except Exception as e:
+        print(f"Error in ctrade command: {e}")
+        await message.reply_text("**ᴀɴ ᴇʀʀᴏʀ ᴏᴄᴄᴜʀʀᴇᴅ ᴡʜɪʟᴇ ᴘʀᴏᴄᴇssɪɴɢ ʏᴏᴜʀ ʀᴇǫᴜᴇsᴛ!**")
+
+@app.on_callback_query(filters.regex(r"^ocancel_"))
+async def handle_outgoing_cancel(client, callback_query):
+    try:
+        data = callback_query.data.split("_")[1]
+        user_id = callback_query.from_user.id
+        
+        if data == "all":
+            # Cancel all outgoing trades
+            cancelled = 0
+            for trade_id in outgoing_trades.get(user_id, []):
+                if trade_id in pending_trades and pending_trades[trade_id]['status'] == 'pending':
+                    pending_trades[trade_id]['status'] = 'cancelled'
+                    cancelled += 1
+            
+            outgoing_trades[user_id] = []
+            await callback_query.answer(f"ᴄᴀɴᴄᴇʟʟᴇᴅ {cancelled} ᴛʀᴀᴅᴇ(s)!", show_alert=True)
+            await callback_query.message.edit_text("**❌ ᴀʟʟ ᴏᴜᴛɢᴏɪɴɢ ᴛʀᴀᴅᴇs ᴄᴀɴᴄᴇʟʟᴇᴅ.**")
+        else:
+            # Cancel specific trade
+            trade_id = data
+            
+            if trade_id in pending_trades and pending_trades[trade_id]['status'] == 'pending':
+                pending_trades[trade_id]['status'] = 'cancelled'
+            
+            if user_id in outgoing_trades and trade_id in outgoing_trades[user_id]:
+                outgoing_trades[user_id].remove(trade_id)
+            
+            await callback_query.answer("ᴛʀᴀᴅᴇ ᴄᴀɴᴄᴇʟʟᴇᴅ!", show_alert=True)
+            await callback_query.message.edit_text("**❌ ᴏᴜᴛɢᴏɪɴɢ ᴛʀᴀᴅᴇ ᴄᴀɴᴄᴇʟʟᴇᴅ.**")
+            
+    except Exception as e:
+        print(f"Error in outgoing cancel: {e}")
+        await callback_query.answer("ᴀɴ ᴇʀʀᴏʀ ᴏᴄᴄᴜʀʀᴇᴅ ᴡʜɪʟᴇ ᴄᴀɴᴄᴇʟʟɪɴɢ ᴛʀᴀᴅᴇ!", show_alert=True)

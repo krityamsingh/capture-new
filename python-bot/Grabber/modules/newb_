@@ -1,0 +1,187 @@
+import random
+import time
+import asyncio
+from pyrogram import Client, filters
+from pyrogram.types import Message
+from . import Grabberu as app, user_collection
+
+# Helper functions
+def to_int(value, default=0):
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+user_cooldowns = {}
+
+async def update_balance(user_id: int, amount: int):
+    user_data = await user_collection.find_one({'id': user_id})
+    if not user_data:
+        await user_collection.insert_one({'id': user_id, 'balance': 0, 'luck': 1.0})
+    
+    current_balance = to_int(user_data.get('balance', 0))
+    new_balance = current_balance + amount
+    
+    if new_balance < 0:
+        return False
+    
+    await user_collection.update_one(
+        {'id': user_id},
+        {'$set': {'balance': new_balance}},
+        upsert=True
+    )
+    return True
+
+async def update_luck(user_id: int):
+    luck_change = random.uniform(-0.05, 0.05)
+    user_data = await user_collection.find_one({'id': user_id})
+    current_luck = float(user_data.get('luck', 1.0)) if user_data else 1.0
+    new_luck = max(0.8, min(1.2, current_luck + luck_change))
+    
+    await user_collection.update_one(
+        {'id': user_id},
+        {'$set': {'luck': new_luck}},
+        upsert=True
+    )
+    return new_luck
+
+def check_cooldown(user_id: int):
+    current_time = time.time()
+    if user_id in user_cooldowns:
+        if current_time - user_cooldowns[user_id] < 30:
+            return False
+    user_cooldowns[user_id] = current_time
+    return True
+
+async def get_bet_amount(user_id: int, bet_input: str):
+    if bet_input == "*":
+        user_data = await user_collection.find_one({'id': user_id})
+        return to_int(user_data.get('balance', 0)) if user_data else 0
+    return to_int(bet_input)
+
+async def animate_penalty(emoji_msg: Message):
+    animations = [
+        "⚽ Player stepping up...",
+        "⚽ Preparing the shot...",
+        "⚽ The keeper is ready...",
+        "⚽ Running up...",
+        "⚽ SHOOTS!",
+        "⚽..."
+    ]
+    
+    for frame in animations:
+        await emoji_msg.edit_text(frame)
+        await asyncio.sleep(1.2)
+
+def get_shot_result(luck: float):
+    roll = random.random() * 1.2  # Max luck is 1.2
+    
+    if roll < 0.15 * luck:  # Goal
+        return "goal", 5.0 * luck
+    elif roll < 0.4:  # Post and in
+        return "post", 2.0 * luck
+    elif roll < 0.75:  # Save
+        return "save", 0
+    else:  # Miss
+        return "miss", 0
+
+def get_result_message(outcome: str, mention: str):
+    messages = {
+        "goal": [
+            f"⚽ **GOOOOAL!** {mention} scores with a perfect shot!",
+            f"⚽ **TOP BINS!** {mention} finds the corner!",
+            f"⚽ **GOLAZO!** {mention} with an unstoppable strike!"
+        ],
+        "post": [
+            f"⚽ **OFF THE POST!** {mention} gets lucky as it bounces in!",
+            f"⚽ **RATTLES IN!** {mention}'s shot hits the woodwork but goes in!"
+        ],
+        "save": [
+            f"⚽ **INCREDIBLE SAVE!** {mention}'s shot was denied!",
+            f"⚽ **KEEPER HERO!** {mention} can't believe the save!"
+        ],
+        "miss": [
+            f"⚽ **EMBARRASSING MISS!** {mention} skies it over the bar!",
+            f"⚽ **WHAT A WASTE!** {mention} completely misses the target!"
+        ]
+    }
+    return random.choice(messages[outcome])
+
+@app.on_message(filters.command("soccer") & filters.group)
+async def soccer_game(client: Client, message: Message):
+    try:
+        bet_input = message.command[1]
+        user_id = message.from_user.id
+        bet_amount = await get_bet_amount(user_id, bet_input)
+        if bet_amount <= 0:
+            raise ValueError
+    except (IndexError, ValueError):
+        help_msg = (
+            "⚽ **Soccer Penalty Game** ⚽\n\n"
+            "Take a penalty shot against the keeper!\n\n"
+            "Usage: `/soccer <amount|*>`\n"
+            "Examples:\n"
+            "• `/soccer 500` - Bet 500 coins\n"
+            "• `/soccer *` - Bet all your coins\n\n"
+            "Payouts:\n"
+            "• ⚽ Goal: 5x\n"
+            "• ⚽ Post: 2x\n"
+            "• ❌ Save/Miss: Lose bet\n\n"
+            "🍀 Luck affects your chances (0.8x-1.2x)"
+        )
+        emoji_msg = await message.reply("⚽")
+        await emoji_msg.reply_text(help_msg)
+        return
+    
+    if not check_cooldown(user_id):
+        emoji_msg = await message.reply("⚽")
+        await emoji_msg.reply_text("⚽ You need to wait 30 seconds before taking another shot!")
+        return
+    
+    user_data = await user_collection.find_one({'id': user_id})
+    current_balance = to_int(user_data.get('balance', 0)) if user_data else 0
+    
+    if current_balance < bet_amount:
+        emoji_msg = await message.reply("⚽")
+        await emoji_msg.reply_text("⚽ You don't have enough coins for this shot!")
+        return
+    
+    current_luck = float(user_data.get('luck', 1.0)) if user_data else 1.0
+    
+    # Create base emoji message
+    emoji_msg = await message.reply("⚽")
+    
+    # Animate the penalty under the emoji
+    await animate_penalty(emoji_msg)
+    
+    # Determine outcome
+    outcome, multiplier = get_shot_result(current_luck)
+    mention = f"[{message.from_user.first_name}](tg://user?id={user_id})"
+    
+    # Calculate winnings
+    if outcome in ["goal", "post"]:
+        winnings = int(bet_amount * multiplier)
+        await update_balance(user_id, winnings)
+        result_text = f"💰 Won: {winnings:,} (×{multiplier:.1f})"
+    else:
+        await update_balance(user_id, -bet_amount)
+        result_text = f"💸 Lost: {bet_amount:,}"
+    
+    # Update luck
+    new_luck = await update_luck(user_id)
+    
+    # Get final balance
+    user_data = await user_collection.find_one({'id': user_id})
+    new_balance = to_int(user_data.get('balance', 0)) if user_data else 0
+    
+    # Build final message
+    final_message = (
+        f"{get_result_message(outcome, mention)}\n\n"
+        f"{result_text}\n"
+        f"🏦 Balance: {new_balance:,}\n"
+        f"🍀 Luck: {new_luck:.2f}x\n"
+        f"⏳ Cooldown: 30s"
+    )
+    
+    # Send result as reply to the emoji message
+    await emoji_msg.reply_text(final_message)

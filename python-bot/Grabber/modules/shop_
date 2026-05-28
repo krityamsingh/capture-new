@@ -1,0 +1,151 @@
+import asyncio
+from pyrogram import Client, filters
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, InputMediaPhoto
+from Grabber import collection, user_collection, app  # user_collection stores user balance & owned characters
+
+# Dictionary to track user session
+store_sessions = {}
+
+# Rarity Costs (Customize as needed)
+rarity_cost = {
+    "⚫ Common": 1000,
+    "🟤 Uncommon": 2500,
+    "🟠 Rare": 5000,
+    "🟣 Epic": 10000,
+    "🟡 Legendary": 25000,
+    "💮 Mythic": 50000,
+    "🔱 Godly": 100000,
+    "🔮 Limited Edition": 250000,
+    "🫧 Premium": 500000,
+    "🏵️ Exotic": 1000000,
+    "⚜️ Unique": 2500000,
+    "⚡ Eternal": 5000000,
+}
+
+# Store Command
+@app.on_message(filters.command("store"))
+async def store_command(client, message):
+    user_id = message.from_user.id
+
+    # Fetch available characters
+    waifus = await collection.find().to_list(length=100)
+    if not waifus:
+        await message.reply_text("🚫 No characters available in the store!")
+        return
+
+    # Store session for user
+    store_sessions[user_id] = {"index": 0, "waifus": waifus}
+
+    # Send first character
+    await send_store_waifu(client, message, user_id, edit=False)
+
+# Function to send waifu details
+async def send_store_waifu(client, message, user_id, edit=True):
+    store_data = store_sessions.get(user_id)
+    if not store_data:
+        return
+
+    index = store_data["index"]
+    waifus = store_data["waifus"]
+    waifu = waifus[index]
+
+    rarity = waifu.get("rarity", "⚫ Common")  # Default rarity
+    cost = rarity_cost.get(rarity, 1000)  # Get cost from rarity, default 1000
+    owners = waifu.get("owners", 0) or "No Owners"
+
+    # Character Info
+    text = (
+        f"✨ **{waifu.get('name', 'Unknown')}**\n"
+        f"📺 Anime: {waifu.get('anime', 'Unknown')}\n"
+        f"🎗 Rarity: {waifu.get('rarity', 'Unknown')}\n"
+        f"🆔 ID: {waifu.get('id', 'Unknown')}\n"
+    )
+
+    # Inline Buttons
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅ Previous", callback_data=f"store_prev_{user_id}"),
+         InlineKeyboardButton("➡ Next", callback_data=f"store_next_{user_id}")],
+        [InlineKeyboardButton(f"🛒 Buy ({cost} coins)", callback_data=f"store_buy_{waifu['_id']}_{user_id}")],
+        [InlineKeyboardButton("❌ Close", callback_data=f"store_close_{user_id}")]
+    ])
+
+    if edit:
+        await message.edit_media(
+            media=InputMediaPhoto(media=waifu["img_url"], caption=text),
+            reply_markup=keyboard
+        )
+    else:
+        await message.reply_photo(photo=waifu["img_url"], caption=text, reply_markup=keyboard)
+
+# Navigation Handlers
+@app.on_callback_query(filters.regex("^store_(next|prev)_"))
+async def store_navigation(client, query: CallbackQuery):
+    user_id = int(query.data.split("_")[-1])
+    if query.from_user.id != user_id:
+        await query.answer("⚠️ You cannot use this button!", show_alert=True)
+        return
+
+    store_data = store_sessions.get(user_id)
+    if not store_data:
+        return
+
+    if "next" in query.data:
+        store_data["index"] = (store_data["index"] + 1) % len(store_data["waifus"])
+    else:
+        store_data["index"] = (store_data["index"] - 1) % len(store_data["waifus"])
+
+    store_sessions[user_id] = store_data
+    await send_store_waifu(client, query.message, user_id, edit=True)
+
+# Buy Handler
+@app.on_callback_query(filters.regex("^store_buy_"))
+async def store_buy(client, query: CallbackQuery):
+    data = query.data.split("_")
+    waifu_id = data[2]
+    user_id = int(data[3])
+
+    if query.from_user.id != user_id:
+        await query.answer("⚠️ You cannot use this button!", show_alert=True)
+        return
+
+    # Fetch character details
+    waifu = await collection.find_one({"_id": waifu_id})
+    if not waifu:
+        await query.answer("🚫 This character is no longer available!", show_alert=True)
+        return
+
+    rarity = waifu.get("rarity", "⚫ Common")
+    cost = rarity_cost.get(rarity, 1000)
+
+    # Fetch user balance
+    user_data = await user_collection.find_one({"user_id": user_id})
+    user_balance = user_data.get("balance", 0) if user_data else 0
+
+    if user_balance < cost:
+        await query.answer(f"🚫 Not enough coins! You need {cost - user_balance} more.", show_alert=True)
+        return
+
+    # Deduct balance and add character to user collection
+    new_balance = user_balance - cost
+    await user_collection.update_one({"user_id": user_id}, {"$set": {"balance": new_balance}}, upsert=True)
+    
+    # Add character to user's owned list
+    await user_collection.update_one(
+        {"user_id": user_id},
+        {"$push": {"owned_waifus": waifu_id}},
+        upsert=True
+    )
+
+    await query.answer(f"✅ Purchased {waifu['name']} for {cost} coins!", show_alert=True)
+    await query.message.reply_text(f"🎉 **Congratulations!**\nYou have bought **{waifu['name']}**!")
+
+# Close Handler
+@app.on_callback_query(filters.regex("^store_close_"))
+async def store_close(client, query: CallbackQuery):
+    user_id = int(query.data.split("_")[-1])
+    if query.from_user.id != user_id:
+        await query.answer("⚠️ You cannot use this button!", show_alert=True)
+        return
+
+    await query.message.delete()
+    store_sessions.pop(user_id, None)

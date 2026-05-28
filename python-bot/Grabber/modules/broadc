@@ -1,0 +1,728 @@
+import asyncio
+import time
+from typing import Dict, List, Set, Optional
+from pyrogram import filters, Client
+from pyrogram.errors import (
+    PeerIdInvalid, FloodWait, ChatAdminRequired, 
+    UserPrivacyRestricted, ChatWriteForbidden,
+    ChannelPrivate, UserIsBlocked, UserNotParticipant
+)
+from pyrogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from datetime import datetime
+import logging
+
+from . import user_collection, app, dev_filter, top_global_groups_collection, broadcast_collection
+
+logger = logging.getLogger(__name__)
+
+class BroadcastManager:
+    """Advanced broadcast manager for Pyrogram"""
+    
+    def __init__(self):
+        self.active_broadcasts: Dict[str, Dict] = {}
+        self.broadcast_tasks: Dict[str, asyncio.Task] = {}
+        self.rate_limits: Dict[int, float] = {}
+        self.MAX_CONCURRENT = 3
+        self.RATE_LIMIT_DELAY = 0.1
+    
+    async def is_dev(self, user_id: int) -> bool:
+        """Check if user is developer/admin"""
+        # Implement your dev check logic here
+        # For example, check against a config or database
+        from . import config
+        return user_id in config.DEVS or user_id == config.OWNER_ID
+    
+    async def broadcast_command(self, _, message: Message):
+        """Handle /broadcast command"""
+        user = message.from_user
+        
+        # Check if user is dev/admin
+        if not await self.is_dev(user.id):
+            await message.reply_text("❌ **Access Denied.**\n\nThis command requires administrator privileges.")
+            return
+        
+        replied_message = message.reply_to_message
+        if not replied_message:
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📖 Guide", callback_data="broadcast_guide")],
+                [InlineKeyboardButton("📊 Stats", callback_data="broadcast_stats")]
+            ])
+            
+            await message.reply_text(
+                "📢 **Broadcast System**\n\n"
+                "Reply to a message to broadcast it.\n\n"
+                "**Modes:**\n"
+                "• `all` - Send to all chats (users + groups)\n"
+                "• `users` - Send to users only (DMs)\n"
+                "• `groups` - Send to groups only\n"
+                "• `pin` - Send and pin in groups\n\n"
+                "**Usage:**\n"
+                "/broadcast <mode> [options]\n"
+                "/broadcast_cancel <id> - Cancel broadcast\n"
+                "/broadcast_status - Check status",
+                reply_markup=keyboard
+            )
+            return
+        
+        # Parse command arguments
+        args = message.text.split()
+        if len(args) < 2:
+            await message.reply_text(
+                "⚠️ **Please specify a mode:**\n\n"
+                "`/broadcast all` - Send to all\n"
+                "`/broadcast users` - Users only\n"
+                "`/broadcast groups` - Groups only\n"
+                "`/broadcast pin` - Send and pin\n\n"
+                "**Options:**\n"
+                "`-d` - Dry run (test without sending)\n"
+                "`-s` - Silent (no notifications)\n\n"
+                "**Example:**\n`/broadcast all -d`"
+            )
+            return
+        
+        mode = args[1].lower()
+        valid_modes = ['all', 'users', 'groups', 'pin']
+        
+        if mode not in valid_modes:
+            await message.reply_text(
+                f"❌ **Invalid mode.**\n\nValid modes: `{', '.join(valid_modes)}`\n\n"
+                f"**Example:** `/broadcast {valid_modes[0]}`"
+            )
+            return
+        
+        # Parse options
+        options = {
+            'dry_run': '-d' in args,
+            'silent': '-s' in args,
+            'schedule': None
+        }
+        
+        # Check for schedule option
+        for arg in args:
+            if arg.startswith('-t='):
+                try:
+                    options['schedule'] = int(arg[3:])
+                except:
+                    pass
+        
+        # Create broadcast
+        broadcast_id = f"bcast_{user.id}_{int(time.time())}"
+        
+        # Get target counts
+        try:
+            users = await user_collection.distinct("user_id")
+            groups = await top_global_groups_collection.distinct("group_id")
+            
+            total_users = len(users)
+            total_groups = len(groups)
+            
+            if total_users == 0 and total_groups == 0:
+                await message.reply_text("❌ **No recipients found.**\n\nThe database is empty.")
+                return
+            
+            # Create broadcast data
+            broadcast_data = {
+                'id': broadcast_id,
+                'initiator_id': user.id,
+                'initiator_name': user.first_name,
+                'initiator_username': user.username,
+                'mode': mode,
+                'message': replied_message,
+                'chat_id': message.chat.id,
+                'message_id': message.id,
+                'total_users': total_users if mode in ['all', 'users'] else 0,
+                'total_groups': total_groups if mode in ['all', 'groups', 'pin'] else 0,
+                'users_sent': 0,
+                'users_failed': 0,
+                'users_skipped': 0,
+                'groups_sent': 0,
+                'groups_failed': 0,
+                'groups_skipped': 0,
+                'is_active': True,
+                'cancelled': False,
+                'start_time': datetime.now(),
+                'options': options,
+                'status_message_id': None
+            }
+            
+            # Store in active broadcasts
+            self.active_broadcasts[broadcast_id] = broadcast_data
+            
+            # Send confirmation message
+            status_text = await self._create_status_message(broadcast_data)
+            keyboard = self._create_status_keyboard(broadcast_id)
+            
+            status_msg = await message.reply_text(
+                status_text,
+                reply_markup=keyboard
+            )
+            
+            broadcast_data['status_message_id'] = status_msg.id
+            
+            # Start broadcast task
+            if options['schedule']:
+                # Schedule for later
+                await self._schedule_broadcast(broadcast_id, app, options['schedule'])
+                await status_msg.edit_text(
+                    f"⏰ **Broadcast Scheduled**\n\n"
+                    f"Broadcast `{broadcast_id}` scheduled for {options['schedule']} seconds from now.",
+                    reply_markup=keyboard
+                )
+            elif options['dry_run']:
+                # Dry run - just show stats
+                await self._dry_run_broadcast(broadcast_id, app)
+            else:
+                # Start actual broadcast
+                broadcast_task = asyncio.create_task(
+                    self._execute_broadcast(broadcast_id, app)
+                )
+                self.broadcast_tasks[broadcast_id] = broadcast_task
+            
+            # Log to database
+            await self._log_broadcast_start(broadcast_data)
+            
+        except Exception as e:
+            logger.error(f"Broadcast command error: {e}")
+            await message.reply_text(f"❌ **Error:** `{str(e)[:200]}`")
+    
+    async def broadcast_cancel_command(self, _, message: Message):
+        """Handle /broadcast_cancel command"""
+        user = message.from_user
+        
+        if not await self.is_dev(user.id):
+            await message.reply_text("❌ **Access Denied.**")
+            return
+        
+        args = message.text.split()
+        if len(args) < 2:
+            # Show active broadcasts
+            active = [b for b in self.active_broadcasts.values() if b['is_active']]
+            
+            if not active:
+                await message.reply_text("📭 **No active broadcasts.**")
+                return
+            
+            text = "📢 **Active Broadcasts:**\n\n"
+            for broadcast in active:
+                duration = (datetime.now() - broadcast['start_time']).seconds
+                text += (
+                    f"• `{broadcast['id']}`\n"
+                    f"  Mode: `{broadcast['mode']}` | "
+                    f"Duration: `{duration}s`\n"
+                    f"  Users: `{broadcast['users_sent']}/{broadcast['total_users']}` | "
+                    f"Groups: `{broadcast['groups_sent']}/{broadcast['total_groups']}`\n\n"
+                )
+            
+            await message.reply_text(text)
+            return
+        
+        broadcast_id = args[1]
+        await self._cancel_broadcast(broadcast_id, message)
+    
+    async def broadcast_status_command(self, _, message: Message):
+        """Handle /broadcast_status command"""
+        user = message.from_user
+        
+        if not await self.is_dev(user.id):
+            await message.reply_text("❌ **Access Denied.**")
+            return
+        
+        args = message.text.split()
+        if len(args) < 2:
+            # Show summary
+            total_active = len([b for b in self.active_broadcasts.values() if b['is_active']])
+            total_completed = len([b for b in self.active_broadcasts.values() if not b['is_active']])
+            
+            await message.reply_text(
+                f"📊 **Broadcast Status**\n\n"
+                f"• Active: `{total_active}`\n"
+                f"• Completed: `{total_completed}`\n"
+                f"• Total: `{total_active + total_completed}`"
+            )
+            return
+        
+        broadcast_id = args[1]
+        await self._show_broadcast_status(broadcast_id, message)
+    
+    async def broadcast_callback_handler(self, _, callback_query: CallbackQuery):
+        """Handle broadcast callback queries"""
+        user = callback_query.from_user
+        data = callback_query.data
+        
+        if data == "broadcast_guide":
+            await self._show_guide(callback_query)
+            return
+        elif data == "broadcast_stats":
+            await self._show_stats(callback_query)
+            return
+        
+        # Parse broadcast action
+        if not data.startswith("bcast_"):
+            return
+        
+        parts = data.split("_")
+        if len(parts) < 3:
+            return
+        
+        action = parts[1]
+        broadcast_id = parts[2]
+        
+        broadcast_data = self.active_broadcasts.get(broadcast_id)
+        if not broadcast_data:
+            await callback_query.answer("Broadcast not found or completed.")
+            return
+        
+        # Check permissions
+        if user.id != broadcast_data['initiator_id'] and not await self.is_dev(user.id):
+            await callback_query.answer("You cannot control this broadcast.")
+            return
+        
+        await callback_query.answer()
+        
+        if action == "refresh":
+            await self._update_status_message(broadcast_id, callback_query.message)
+        elif action == "cancel":
+            await self._cancel_broadcast(broadcast_id, callback_query.message)
+        elif action == "details":
+            await self._show_detailed_stats(broadcast_id, callback_query.message)
+    
+    async def _execute_broadcast(self, broadcast_id: str, client: Client):
+        """Execute broadcast"""
+        broadcast_data = self.active_broadcasts.get(broadcast_id)
+        if not broadcast_data:
+            return
+        
+        try:
+            # Send to groups
+            if broadcast_data['mode'] in ['all', 'groups', 'pin']:
+                await self._broadcast_to_groups(broadcast_id, client)
+            
+            # Send to users
+            if broadcast_data['mode'] in ['all', 'users']:
+                await self._broadcast_to_users(broadcast_id, client)
+            
+            # Mark as completed
+            broadcast_data['is_active'] = False
+            
+            # Send completion message
+            await self._send_completion_message(broadcast_id, client)
+            
+            # Log completion
+            await self._log_broadcast_complete(broadcast_data)
+            
+            # Cleanup after delay
+            await asyncio.sleep(300)
+            self._cleanup_broadcast(broadcast_id)
+            
+        except asyncio.CancelledError:
+            logger.info(f"Broadcast {broadcast_id} cancelled")
+            self._cleanup_broadcast(broadcast_id)
+        except Exception as e:
+            logger.error(f"Broadcast error {broadcast_id}: {e}")
+            self._cleanup_broadcast(broadcast_id)
+    
+    async def _broadcast_to_groups(self, broadcast_id: str, client: Client):
+        """Broadcast to groups"""
+        broadcast_data = self.active_broadcasts[broadcast_id]
+        groups = await top_global_groups_collection.distinct("group_id")
+        
+        for group_id in groups:
+            if not broadcast_data['is_active'] or broadcast_data['cancelled']:
+                break
+            
+            try:
+                # Check if bot is in group (optional)
+                try:
+                    await client.get_chat_member(group_id, "me")
+                except:
+                    broadcast_data['groups_skipped'] += 1
+                    continue
+                
+                # Send message
+                sent_msg = await broadcast_data['message'].copy(
+                    chat_id=group_id,
+                    disable_notification=broadcast_data['options']['silent']
+                )
+                
+                # Pin if mode is 'pin'
+                if broadcast_data['mode'] == 'pin':
+                    try:
+                        await client.pin_chat_message(group_id, sent_msg.id)
+                    except ChatAdminRequired:
+                        pass
+                
+                broadcast_data['groups_sent'] += 1
+                
+            except FloodWait as e:
+                await asyncio.sleep(e.value)
+                continue
+            except (ChatWriteForbidden, ChannelPrivate, PeerIdInvalid):
+                broadcast_data['groups_skipped'] += 1
+            except Exception as e:
+                logger.warning(f"Failed to send to group {group_id}: {e}")
+                broadcast_data['groups_failed'] += 1
+            
+            # Update status every 5 groups
+            if broadcast_data['groups_sent'] % 5 == 0:
+                await self._update_status_message(broadcast_id, None, client)
+            
+            await asyncio.sleep(self.RATE_LIMIT_DELAY)
+    
+    async def _broadcast_to_users(self, broadcast_id: str, client: Client):
+        """Broadcast to users"""
+        broadcast_data = self.active_broadcasts[broadcast_id]
+        users = await user_collection.distinct("user_id")
+        
+        for user_id in users:
+            if not broadcast_data['is_active'] or broadcast_data['cancelled']:
+                break
+            
+            try:
+                # Check if user has blocked bot
+                try:
+                    await client.send_chat_action(user_id, "typing")
+                except (UserIsBlocked, UserPrivacyRestricted):
+                    broadcast_data['users_skipped'] += 1
+                    continue
+                
+                # Send message
+                await broadcast_data['message'].copy(
+                    chat_id=user_id,
+                    disable_notification=broadcast_data['options']['silent']
+                )
+                
+                broadcast_data['users_sent'] += 1
+                
+            except FloodWait as e:
+                await asyncio.sleep(e.value)
+                continue
+            except (UserIsBlocked, UserPrivacyRestricted, PeerIdInvalid):
+                broadcast_data['users_skipped'] += 1
+            except Exception as e:
+                logger.warning(f"Failed to send to user {user_id}: {e}")
+                broadcast_data['users_failed'] += 1
+            
+            # Update status every 10 users
+            if broadcast_data['users_sent'] % 10 == 0:
+                await self._update_status_message(broadcast_id, None, client)
+            
+            await asyncio.sleep(self.RATE_LIMIT_DELAY * 1.5)
+    
+    async def _update_status_message(self, broadcast_id: str, message: Optional[Message] = None, client: Optional[Client] = None):
+        """Update broadcast status message"""
+        broadcast_data = self.active_broadcasts.get(broadcast_id)
+        if not broadcast_data or not broadcast_data.get('status_message_id'):
+            return
+        
+        status_text = await self._create_status_message(broadcast_data)
+        keyboard = self._create_status_keyboard(broadcast_id)
+        
+        try:
+            if message:
+                await message.edit_text(status_text, reply_markup=keyboard)
+            elif client and broadcast_data.get('chat_id') and broadcast_data.get('status_message_id'):
+                await client.edit_message_text(
+                    chat_id=broadcast_data['chat_id'],
+                    message_id=broadcast_data['status_message_id'],
+                    text=status_text,
+                    reply_markup=keyboard
+                )
+        except Exception as e:
+            logger.debug(f"Failed to update status: {e}")
+    
+    async def _cancel_broadcast(self, broadcast_id: str, message: Message):
+        """Cancel broadcast"""
+        broadcast_data = self.active_broadcasts.get(broadcast_id)
+        if not broadcast_data:
+            await message.reply_text("❌ **Broadcast not found.**")
+            return
+        
+        broadcast_data['is_active'] = False
+        broadcast_data['cancelled'] = True
+        
+        # Cancel task
+        task = self.broadcast_tasks.get(broadcast_id)
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        
+        # Update status
+        await message.reply_text(
+            f"⛔ **Broadcast Cancelled**\n\n"
+            f"Broadcast `{broadcast_id}` has been cancelled.\n\n"
+            f"• Users sent: `{broadcast_data['users_sent']}`\n"
+            f"• Groups sent: `{broadcast_data['groups_sent']}`"
+        )
+        
+        # Update status message if exists
+        if broadcast_data.get('status_message_id'):
+            try:
+                await app.edit_message_text(
+                    chat_id=broadcast_data['chat_id'],
+                    message_id=broadcast_data['status_message_id'],
+                    text=f"⛔ **Broadcast Cancelled**\n\nID: `{broadcast_id}`"
+                )
+            except:
+                pass
+        
+        # Log cancellation
+        await self._log_broadcast_cancelled(broadcast_data)
+        
+        # Cleanup
+        self._cleanup_broadcast(broadcast_id)
+    
+    async def _send_completion_message(self, broadcast_id: str, client: Client):
+        """Send completion message"""
+        broadcast_data = self.active_broadcasts.get(broadcast_id)
+        if not broadcast_data:
+            return
+        
+        duration = (datetime.now() - broadcast_data['start_time']).seconds
+        
+        completion_text = (
+            f"✅ **Broadcast Completed!**\n\n"
+            f"• Users: `{broadcast_data['users_sent']}/{broadcast_data['total_users']}`\n"
+            f"• Groups: `{broadcast_data['groups_sent']}/{broadcast_data['total_groups']}`\n"
+            f"• Failed: `{broadcast_data['users_failed'] + broadcast_data['groups_failed']}`\n"
+            f"• Skipped: `{broadcast_data['users_skipped'] + broadcast_data['groups_skipped']}`\n"
+            f"• Duration: `{duration}s`"
+        )
+        
+        if broadcast_data.get('status_message_id'):
+            try:
+                await client.edit_message_text(
+                    chat_id=broadcast_data['chat_id'],
+                    message_id=broadcast_data['status_message_id'],
+                    text=completion_text
+                )
+            except Exception as e:
+                logger.error(f"Failed to send completion: {e}")
+    
+    async def _create_status_message(self, broadcast_data: Dict) -> str:
+        """Create status message text"""
+        total_sent = broadcast_data['users_sent'] + broadcast_data['groups_sent']
+        total_targets = broadcast_data['total_users'] + broadcast_data['total_groups']
+        
+        if total_targets > 0:
+            percent = (total_sent / total_targets) * 100
+        else:
+            percent = 0
+        
+        status_text = (
+            f"📢 **Broadcast in Progress**\n\n"
+            f"• Mode: `{broadcast_data['mode']}`\n"
+            f"• Users: `{broadcast_data['users_sent']}/{broadcast_data['total_users']}`\n"
+            f"• Groups: `{broadcast_data['groups_sent']}/{broadcast_data['total_groups']}`\n"
+            f"• Progress: `{percent:.1f}%`\n"
+            f"• Duration: `{(datetime.now() - broadcast_data['start_time']).seconds}s`"
+        )
+        
+        return status_text
+    
+    def _create_status_keyboard(self, broadcast_id: str) -> InlineKeyboardMarkup:
+        """Create status keyboard"""
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🔄 Refresh", callback_data=f"bcast_refresh_{broadcast_id}"),
+                InlineKeyboardButton("⛔ Cancel", callback_data=f"bcast_cancel_{broadcast_id}")
+            ],
+            [
+                InlineKeyboardButton("📊 Details", callback_data=f"bcast_details_{broadcast_id}")
+            ]
+        ])
+    
+    async def _dry_run_broadcast(self, broadcast_id: str, client: Client):
+        """Perform dry run (test without sending)"""
+        broadcast_data = self.active_broadcasts[broadcast_id]
+        
+        # Just show what would be sent
+        await client.send_message(
+            broadcast_data['chat_id'],
+            f"🔍 **Dry Run Results**\n\n"
+            f"• Mode: `{broadcast_data['mode']}`\n"
+            f"• Target Users: `{broadcast_data['total_users']}`\n"
+            f"• Target Groups: `{broadcast_data['total_groups']}`\n"
+            f"• Total Targets: `{broadcast_data['total_users'] + broadcast_data['total_groups']}`\n\n"
+            f"*No messages were actually sent.*"
+        )
+        
+        self._cleanup_broadcast(broadcast_id)
+    
+    async def _schedule_broadcast(self, broadcast_id: str, client: Client, delay: int):
+        """Schedule broadcast for later"""
+        await asyncio.sleep(delay)
+        
+        if broadcast_id in self.active_broadcasts:
+            broadcast_data = self.active_broadcasts[broadcast_id]
+            broadcast_data['is_active'] = True
+            
+            # Start broadcast
+            broadcast_task = asyncio.create_task(
+                self._execute_broadcast(broadcast_id, client)
+            )
+            self.broadcast_tasks[broadcast_id] = broadcast_task
+    
+    async def _show_broadcast_status(self, broadcast_id: str, message: Message):
+        """Show detailed broadcast status"""
+        broadcast_data = self.active_broadcasts.get(broadcast_id)
+        if not broadcast_data:
+            await message.reply_text("❌ **Broadcast not found.**")
+            return
+        
+        detailed_text = (
+            f"📊 **Broadcast Status:** `{broadcast_id}`\n\n"
+            f"• Initiator: `{broadcast_data['initiator_name']}`\n"
+            f"• Mode: `{broadcast_data['mode']}`\n"
+            f"• Status: `{'Active' if broadcast_data['is_active'] else 'Completed'}`\n"
+            f"• Users: `{broadcast_data['users_sent']}/{broadcast_data['total_users']}`\n"
+            f"• Groups: `{broadcast_data['groups_sent']}/{broadcast_data['total_groups']}`\n"
+            f"• Failed: `{broadcast_data['users_failed'] + broadcast_data['groups_failed']}`\n"
+            f"• Start Time: `{broadcast_data['start_time'].strftime('%Y-%m-%d %H:%M:%S')}`"
+        )
+        
+        await message.reply_text(detailed_text)
+    
+    async def _show_detailed_stats(self, broadcast_id: str, message: Message):
+        """Show detailed statistics"""
+        broadcast_data = self.active_broadcasts.get(broadcast_id)
+        if not broadcast_data:
+            return
+        
+        detailed_text = (
+            f"📈 **Detailed Statistics**\n\n"
+            f"**Users (DMs):**\n"
+            f"• Sent: `{broadcast_data['users_sent']}/{broadcast_data['total_users']}`\n"
+            f"• Failed: `{broadcast_data['users_failed']}`\n"
+            f"• Skipped: `{broadcast_data['users_skipped']}`\n\n"
+            f"**Groups:**\n"
+            f"• Sent: `{broadcast_data['groups_sent']}/{broadcast_data['total_groups']}`\n"
+            f"• Failed: `{broadcast_data['groups_failed']}`\n"
+            f"• Skipped: `{broadcast_data['groups_skipped']}`"
+        )
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ Back", callback_data=f"bcast_refresh_{broadcast_id}")]
+        ])
+        
+        await message.edit_text(detailed_text, reply_markup=keyboard)
+    
+    async def _show_guide(self, callback_query: CallbackQuery):
+        """Show broadcast guide"""
+        guide_text = (
+            "📖 **Broadcast System Guide**\n\n"
+            "**Commands:**\n"
+            "• `/broadcast <mode>` - Start broadcast\n"
+            "• `/broadcast_cancel [id]` - Cancel broadcast\n"
+            "• `/broadcast_status [id]` - Check status\n\n"
+            "**Modes:**\n"
+            "• `all` - Send to all users & groups\n"
+            "• `users` - Send to users only (DMs)\n"
+            "• `groups` - Send to groups only\n"
+            "• `pin` - Send and pin in groups\n\n"
+            "**Options:**\n"
+            "• `-d` - Dry run (test without sending)\n"
+            "• `-s` - Silent (no notifications)\n"
+            "• `-t=60` - Schedule (seconds)\n\n"
+            "**Examples:**\n"
+            "`/broadcast all`\n"
+            "`/broadcast groups -s`\n"
+            "`/broadcast users -t=300`"
+        )
+        
+        await callback_query.message.edit_text(guide_text)
+    
+    async def _show_stats(self, callback_query: CallbackQuery):
+        """Show broadcast statistics"""
+        try:
+            users = await user_collection.distinct("user_id")
+            groups = await top_global_groups_collection.distinct("group_id")
+            
+            active_broadcasts = len([b for b in self.active_broadcasts.values() if b['is_active']])
+            
+            stats_text = (
+                f"📊 **Broadcast Statistics**\n\n"
+                f"• Total Users: `{len(users)}`\n"
+                f"• Total Groups: `{len(groups)}`\n"
+                f"• Active Broadcasts: `{active_broadcasts}`"
+            )
+            
+            await callback_query.message.edit_text(stats_text)
+        except Exception as e:
+            logger.error(f"Error showing stats: {e}")
+    
+    async def _log_broadcast_start(self, broadcast_data: Dict):
+        """Log broadcast start to database"""
+        try:
+            await broadcast_collection.insert_one({
+                'broadcast_id': broadcast_data['id'],
+                'initiator_id': broadcast_data['initiator_id'],
+                'initiator_name': broadcast_data['initiator_name'],
+                'mode': broadcast_data['mode'],
+                'start_time': broadcast_data['start_time'],
+                'total_users': broadcast_data['total_users'],
+                'total_groups': broadcast_data['total_groups'],
+                'status': 'started',
+                'options': broadcast_data['options']
+            })
+        except Exception as e:
+            logger.error(f"Failed to log broadcast start: {e}")
+    
+    async def _log_broadcast_complete(self, broadcast_data: Dict):
+        """Log broadcast completion to database"""
+        try:
+            await broadcast_collection.update_one(
+                {'broadcast_id': broadcast_data['id']},
+                {'$set': {
+                    'end_time': datetime.now(),
+                    'status': 'completed',
+                    'users_sent': broadcast_data['users_sent'],
+                    'users_failed': broadcast_data['users_failed'],
+                    'groups_sent': broadcast_data['groups_sent'],
+                    'groups_failed': broadcast_data['groups_failed']
+                }}
+            )
+        except Exception as e:
+            logger.error(f"Failed to log broadcast completion: {e}")
+    
+    async def _log_broadcast_cancelled(self, broadcast_data: Dict):
+        """Log broadcast cancellation to database"""
+        try:
+            await broadcast_collection.update_one(
+                {'broadcast_id': broadcast_data['id']},
+                {'$set': {
+                    'end_time': datetime.now(),
+                    'status': 'cancelled',
+                    'users_sent': broadcast_data['users_sent'],
+                    'groups_sent': broadcast_data['groups_sent']
+                }}
+            )
+        except Exception as e:
+            logger.error(f"Failed to log broadcast cancellation: {e}")
+    
+    def _cleanup_broadcast(self, broadcast_id: str):
+        """Cleanup broadcast resources"""
+        if broadcast_id in self.active_broadcasts:
+            del self.active_broadcasts[broadcast_id]
+        
+        if broadcast_id in self.broadcast_tasks:
+            del self.broadcast_tasks[broadcast_id]
+    
+    def cleanup_all(self):
+        """Cleanup all broadcast resources"""
+        for task in self.broadcast_tasks.values():
+            task.cancel()
+        
+        self.active_broadcasts.clear()
+        self.broadcast_tasks.clear()
+
+# Initialize broadcast manager
+broadcast_manager = BroadcastManager()
+
+# Register handlers
+app.add_handler(filters.command("broadcast") & dev_filter, broadcast_manager.broadcast_command)
+app.add_handler(filters.command("broadcast_cancel") & dev_filter, broadcast_manager.broadcast_cancel_command)
+app.add_handler(filters.command("broadcast_status") & dev_filter, broadcast_manager.broadcast_status_command)
+app.add_handler(filters.callback_query("broadcast_"), broadcast_manager.broadcast_callback_handler)
