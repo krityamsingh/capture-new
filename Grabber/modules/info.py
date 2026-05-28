@@ -99,11 +99,18 @@ def _build_caption(character: dict) -> str:
     emoji       = RARITY_EMOJIS.get(rarity, "✨")
     owners      = character.get("owners", 0)
     owners_text = str(owners) if owners else "None yet"
+    video_url   = character.get("video_url", "")
+    img_url     = character.get("img_url", "")
+    media_url   = video_url if _is_animated(character) and video_url else img_url
+
+    name_text = character['name']
+    if media_url:
+        name_text = f"<a href='{media_url}'>{name_text}</a>"
 
     return (
         f"✨ <b>ʟᴏᴏᴋ ᴀᴛ ᴛʜɪꜱ ᴄʜᴀʀᴀᴄᴛᴇʀ!</b>\n\n"
         f"🆔 <b>ID:</b> <code>{character['id']}</code>\n"
-        f"👤 <b>ɴᴀᴍᴇ:</b> {character['name']}\n"
+        f"👤 <b>ɴᴀᴍᴇ:</b> {name_text}\n"
         f"📺 <b>ᴀɴɪᴍᴇ:</b> {character['anime']}\n"
         f"{emoji} <b>ʀᴀʀɪᴛʏ:</b> {rarity}\n"
         f"👥 <b>ᴏᴡɴᴇʀs:</b> {owners_text}"
@@ -239,7 +246,8 @@ async def _send_character_media(
 async def details(update: Update, context: CallbackContext) -> None:
     """
     /check <id>
-    Look up a character by ID and send its media with action buttons.
+    Look up a character by ID and send its details (with webpage media preview)
+    and action buttons.
     """
     args = context.args
     if not args:
@@ -260,34 +268,16 @@ async def details(update: Update, context: CallbackContext) -> None:
     caption  = _build_caption(character)
     keyboard = _build_keyboard(char_id)
 
-    # Thin adapter so _send_character_media stays framework-agnostic
-    async def _reply(media_type, media, caption, parse_mode, reply_markup):
-        if media_type == "video":
-            await update.message.reply_video(
-                video=media,
-                caption=caption,
-                parse_mode=parse_mode,
-                reply_markup=reply_markup,
-            )
-        else:
-            await update.message.reply_photo(
-                photo=media,
-                caption=caption,
-                parse_mode=parse_mode,
-                reply_markup=reply_markup,
-            )
-
-    async def _fallback(text, parse_mode, reply_markup):
-        await update.message.reply_text(
-            text, parse_mode=parse_mode, reply_markup=reply_markup
-        )
-
     try:
-        await _send_character_media(character, _reply, keyboard, caption, _fallback)
+        await update.message.reply_text(
+            caption,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
     except Exception as exc:
         print(f"❌ /check error  char_id={char_id!r}: {exc}")
         await update.message.reply_text(
-            capsify("Failed to send media. Please try again later.")
+            capsify("Failed to send details. Please try again later.")
         )
 
 
@@ -391,8 +381,8 @@ async def top_grabbers(update: Update, context: CallbackContext) -> None:
     )
 
     try:
-        await query.edit_message_caption(
-            caption=caption,
+        await query.edit_message_text(
+            text=caption,
             parse_mode="HTML",
             reply_markup=_build_back_keyboard(char_id),
         )
@@ -407,8 +397,7 @@ async def top_grabbers(update: Update, context: CallbackContext) -> None:
 async def back_to_details(update: Update, context: CallbackContext) -> None:
     """
     Button: "Back to details"
-    Re-sends the character's media (video or photo) by editing the message.
-    Handles both "⚜️ Animated" and "🧬 Animation" rarity labels correctly.
+    Re-sends the character's details by editing the message text.
     """
     query   = update.callback_query
     await query.answer("🌀 Loading...", cache_time=2)
@@ -427,60 +416,16 @@ async def back_to_details(update: Update, context: CallbackContext) -> None:
 
     caption   = _build_caption(character)
     keyboard  = _build_keyboard(char_id)
-    video_url = character.get("video_url", "")
-    img_url   = character.get("img_url", "")
-    animated  = _is_animated(character)
 
-    tmp_path = None
     try:
-        try:
-            if animated and video_url:
-                tmp_path = await _download_to_temp(video_url, ".mp4")
-                with open(tmp_path, "rb") as fh:
-                    await query.edit_message_media(
-                        media=InputMediaVideo(
-                            media=fh,
-                            caption=caption,
-                            parse_mode="HTML",
-                        ),
-                        reply_markup=keyboard,
-                    )
-                return
-
-            elif img_url:
-                tmp_path = await _download_to_temp(img_url, ".jpg")
-                with open(tmp_path, "rb") as fh:
-                    await query.edit_message_media(
-                        media=InputMediaPhoto(
-                            media=fh,
-                            caption=caption,
-                            parse_mode="HTML",
-                        ),
-                        reply_markup=keyboard,
-                    )
-                return
-            else:
-                raise ValueError("No media URLs available")
-        except Exception as exc:
-            print(f"⚠️ Failed to edit with original media for character {char_id}: {exc}")
-            _safe_delete(tmp_path)
-            tmp_path = await _download_to_temp(FALLBACK_IMG, ".jpg")
-            with open(tmp_path, "rb") as fh:
-                await query.edit_message_media(
-                    media=InputMediaPhoto(
-                        media=fh,
-                        caption=caption,
-                        parse_mode="HTML",
-                    ),
-                    reply_markup=keyboard,
-                )
-
+        await query.edit_message_text(
+            text=caption,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
     except Exception as exc:
-        print(f"❌ back_to_details fallback error  char_id={char_id!r}: {exc}")
-        await query.answer("❌ Failed to load media. Try again.", show_alert=True)
-
-    finally:
-        _safe_delete(tmp_path)
+        print(f"❌ back_to_details error  char_id={char_id!r}: {exc}")
+        await query.answer("❌ Failed to load details. Try again.", show_alert=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
