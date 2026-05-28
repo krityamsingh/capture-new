@@ -3,7 +3,7 @@ aiohttp==3.11.17
 python-telegram-bot[job-queue]>=21.0
 pymongo<4.9
 pyrate-limiter==3.7.0
-apscheduler==3.10.1
+apscheduler==3.10.4
 pyrogram==2.0.106
 python-dotenv==1.0.1
 cachetools==5.5.2
