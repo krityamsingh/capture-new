@@ -9,7 +9,7 @@ async def play_game_command(client: Client, message: Message):
     webapp_url = "https://captrue-miniapp.vercel.app?tab=arcade" 
     
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎮 Play Arcade Games", web_app=WebAppInfo(url=webapp_url))]
+        [InlineKeyboardButton("🚀 Launch App", web_app=WebAppInfo(url=webapp_url))]
     ])
     
     await message.reply_text(
