@@ -80,7 +80,7 @@ async def claim_character(client: Client, message: Message):
     is_member = await check_membership(user_id)
     if not is_member and user_id not in OWNER_IDS:
         buttons = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Support Group", url=f"https://t.me/{SUPPORT_GROUP_ID}"),
+            [InlineKeyboardButton("Support Group", url="https://t.me/Soul_Supports"),
              InlineKeyboardButton("News Channel", url=f"https://t.me/{SUPPORT_CHANNEL_USERNAME}")],
             [InlineKeyboardButton("Anime Group", url=f"https://t.me/{ANIME_GROUP_USERNAME}")]
         ])
