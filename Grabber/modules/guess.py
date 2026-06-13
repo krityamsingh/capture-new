@@ -12,12 +12,12 @@ GUESS_TIMEOUT = 180  # 3 minutes timeout for each game
 COOLDOWN = 3  # 3 seconds cooldown between games
 
 # Support group ID
-SUPPORT_GROUP_ID = -1002313549356
+SUPPORT_GROUP_ID = -1002319525523
 
 def support_group_only(func):
     async def wrapper(client, message: Message):
         if message.chat.id != SUPPORT_GROUP_ID:
-            await message.reply("This command only works in the official support group: @thereapersagain")
+            await message.reply("This command only works in the official support group: @Divine_Catchers")
             return
         return await func(client, message)
     return wrapper

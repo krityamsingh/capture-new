@@ -370,6 +370,11 @@ GAMING_COMMANDS = {
         "description": "Weapons shop",
         "usage": "/weapons",
         "notes": "Buy combat equipment"
+    },
+    "wordle": {
+        "description": "Play a visual Wordle game",
+        "usage": "/wordle",
+        "notes": "Guess the 5-letter word in 6 tries"
     }
 }
 
