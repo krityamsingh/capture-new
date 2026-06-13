@@ -426,7 +426,7 @@ def format_command_help(cmd: str, details: dict):
 # =============================================
 # MAIN HELP COMMAND
 # =============================================
-@app.on_message(filters.command("help"))
+@app.on_message(filters.command(["help", "commands"]))
 async def help_command(client: Client, message: Message):
     """Main help command with video and menu"""
     help_text = textwrap.dedent(f"""

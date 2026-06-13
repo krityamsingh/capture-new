@@ -28,7 +28,7 @@ async def store_command(client, message):
     user_id = message.from_user.id
 
     # Fetch available characters
-    waifus = await collection.find().to_list(length=100)
+    waifus = await collection.find({"img_url": {"$exists": True, "$ne": ""}}).to_list(length=100)
     if not waifus:
         await message.reply_text("🚫 No characters available in the store!")
         return

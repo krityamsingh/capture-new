@@ -54,7 +54,7 @@ async def open_store(client, message):
 
 async def get_store_characters():
     chars = await collection.aggregate([
-        {"$match": {"rarity": {"$in": store_rarities}}},
+        {"$match": {"rarity": {"$in": store_rarities}, "img_url": {"$exists": True, "$ne": ""}}},
         {"$sample": {"size": 30}}  # Show more options in store
     ]).to_list(length=30)
     for char in chars:
