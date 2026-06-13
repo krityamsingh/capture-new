@@ -1,6 +1,9 @@
 import asyncio
 import random
 import logging
+import io
+import os
+from PIL import Image, ImageDraw, ImageFont
 from pyrogram import filters
 from pyrogram.types import Message
 from . import app, sudo_filter, user_collection, aruby
@@ -59,44 +62,78 @@ def _score_guess(guess: str, word: str) -> list[str]:
     return result
 
 
-_EMOJI = {"green": "🟩", "yellow": "🟨", "gray": "⬛"}
-_LETTER_EMOJI = {
-    c: chr(0x1F1E6 + ord(c) - ord('A')) for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-}
-
-
-def _render_game(game: dict, reveal_word: bool = False) -> str:
-    word    = game["word"]
+async def _send_wordle_board(m: Message, game: dict, extra_text: str = ""):
+    word = game["word"]
     guesses = game["guesses"]
-    lines   = []
-
-    # Title
-    left = MAX_GUESSES - len(guesses)
-    lines.append(f"**🔤 WORDLE** — {len(guesses)}/{MAX_GUESSES} guesses")
-    lines.append("")
-
-    # All guesses so far
-    for g in guesses:
-        scores = _score_guess(g, word)
-        emoji_row  = "".join(_EMOJI[s] for s in scores)
-        letter_row = "  ".join(_LETTER_EMOJI[c] for c in g)
-        lines.append(emoji_row)
-        lines.append(letter_row)
-        lines.append("")
-
-    # Empty rows
-    for _ in range(MAX_GUESSES - len(guesses)):
-        lines.append("⬜⬜⬜⬜⬜")
-        lines.append("\u2003\u2003\u2003\u2003\u2003")  # em spaces placeholder
-        lines.append("")
-
+    
+    # Proportions
+    cell_size = 100
+    gap = 10
+    padding = 15
+    cols, rows = 5, 6
+    
+    width = 2 * padding + cols * cell_size + (cols - 1) * gap
+    height = 2 * padding + rows * cell_size + (rows - 1) * gap
+    
+    # Create image
+    img = Image.new("RGB", (width, height), color=(18, 18, 19))
+    draw = ImageDraw.Draw(img)
+    
+    # Load font
+    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    if not os.path.exists(font_path):
+        font_path = "/usr/share/fonts/truetype/noto/NotoSansMono-Bold.ttf"
+    
+    try:
+        font = ImageFont.truetype(font_path, 55)
+    except Exception:
+        font = ImageFont.load_default()
+        
+    for r in range(rows):
+        has_guess = r < len(guesses)
+        guess = guesses[r] if has_guess else None
+        scores = _score_guess(guess, word) if has_guess else None
+        
+        for c in range(cols):
+            x0 = padding + c * (cell_size + gap)
+            y0 = padding + r * (cell_size + gap)
+            x1 = x0 + cell_size
+            y1 = y0 + cell_size
+            
+            if has_guess:
+                score = scores[c]
+                if score == "green":
+                    fill_color = (108, 169, 101)  # #6ca965
+                elif score == "yellow":
+                    fill_color = (201, 180, 88)   # #c9b458
+                else:
+                    fill_color = (120, 124, 126)  # #787c7e
+                
+                # Draw filled cell
+                draw.rectangle([x0, y0, x1, y1], fill=fill_color)
+                
+                # Draw letter centered
+                letter = guess[c]
+                cx = (x0 + x1) / 2
+                cy = (y0 + y1) / 2
+                draw.text((cx, cy), letter, fill=(255, 255, 255), font=font, anchor="mm")
+            else:
+                # Draw empty cell with border
+                draw.rectangle([x0, y0, x1, y1], fill=(18, 18, 19), outline=(58, 58, 60), width=2)
+                
+    # Save to BytesIO
+    photo_io = io.BytesIO()
+    img.save(photo_io, "PNG")
+    photo_io.seek(0)
+    photo_io.name = "wordle.png"
+    
     # Keyboard tracker
     used_green  = set()
     used_yellow = set()
     used_gray   = set()
     for g in guesses:
-        scores = _score_guess(g, word)
-        for ch, sc in zip(g, scores):
+        g_scores = _score_guess(g, word)
+        for ch, sc in zip(g, g_scores):
             if sc == "green":  used_green.add(ch)
             elif sc == "yellow": used_yellow.add(ch)
             else: used_gray.add(ch)
@@ -104,20 +141,20 @@ def _render_game(game: dict, reveal_word: bool = False) -> str:
     rows_kb = ["QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"]
     kb_lines = []
     for row in rows_kb:
-        r = []
+        r_kb = []
         for ch in row:
-            if ch in used_green:   r.append("🟩")
-            elif ch in used_yellow: r.append("🟨")
-            elif ch in used_gray:   r.append("⬛")
-            else:                   r.append("⬜")
-        kb_lines.append("".join(r))
-    lines.append("**Keyboard:**")
-    lines += kb_lines
-
-    if reveal_word:
-        lines.append(f"\n🔑 The word was: **{word}**")
-
-    return "\n".join(lines)
+            if ch in used_green:   r_kb.append("🟩")
+            elif ch in used_yellow: r_kb.append("🟨")
+            elif ch in used_gray:   r_kb.append("⬛")
+            else:                   r_kb.append("⬜")
+        kb_lines.append("".join(r_kb))
+        
+    caption = f"**🔤 WORDLE** — {len(guesses)}/{MAX_GUESSES} guesses\n\n"
+    caption += "**Keyboard:**\n" + "\n".join(kb_lines)
+    if extra_text:
+        caption += f"\n\n{extra_text}"
+        
+    await m.reply_photo(photo=photo_io, caption=caption)
 
 
 # ── /wordle ───────────────────────────────────────────────────────────────────
@@ -127,7 +164,7 @@ async def wordle_cmd(client, m: Message):
     if chat_id in _wordle_games:
         # Already running — show current board
         game = _wordle_games[chat_id]
-        await m.reply(_render_game(game) + "\n\n_Type a 5-letter word to guess!_")
+        await _send_wordle_board(m, game, "_Type a 5-letter word to guess!_")
         return
 
     word = random.choice(WORD_LIST)
@@ -138,10 +175,9 @@ async def wordle_cmd(client, m: Message):
         "chat_id":     chat_id,
     }
     game = _wordle_games[chat_id]
-    await m.reply(
-        _render_game(game)
-        + "\n\n🎮 **Game started!** Type any 5-letter word to guess."
-        + "\n💡 🟩 correct · 🟨 wrong spot · ⬛ not in word"
+    await _send_wordle_board(
+        m, game,
+        "🎮 **Game started!** Type any 5-letter word to guess.\n💡 🟩 correct · 🟨 wrong spot · ⬛ not in word"
     )
 
 
@@ -197,29 +233,25 @@ async def wordle_guess_listener(client, m: Message):
             })
             
         await aruby(uid, ruby)
-        board = _render_game(game)
-        await m.reply(
-            board
-            + f"\n\n🎉 **{name}** solved it in {guesses_used} guess{'es' if guesses_used > 1 else ''}!"
-            + f"\n🔑 Word: **{word}**"
-            + f"\n💎 +{ruby:,} Ruby"
-            + "\n\n▶️ Type /wordle to play again!"
+        
+        extra_text = (
+            f"🎉 **{name}** solved it in {guesses_used} guess{'es' if guesses_used > 1 else ''}!\n"
+            f"🔑 Word: **{word}**\n"
+            f"💎 +{ruby:,} Ruby\n\n"
+            f"▶️ Type /wordle to play again!"
         )
+        await _send_wordle_board(m, game, extra_text)
     elif lost:
         del _wordle_games[chat_id]
-        board = _render_game(game, reveal_word=True)
-        await m.reply(
-            board
-            + f"\n\n😔 No one guessed it! The word was **{word}**."
-            + "\n▶️ Type /wordle to play again!"
+        extra_text = (
+            f"😔 No one guessed it! The word was **{word}**.\n"
+            f"▶️ Type /wordle to play again!"
         )
+        await _send_wordle_board(m, game, extra_text)
     else:
-        board = _render_game(game)
         remaining = MAX_GUESSES - len(game["guesses"])
-        await m.reply(
-            board
-            + f"\n\n🎯 {remaining} guess{'es' if remaining > 1 else ''} remaining — keep going!"
-        )
+        extra_text = f"🎯 {remaining} guess{'es' if remaining > 1 else ''} remaining — keep going!"
+        await _send_wordle_board(m, game, extra_text)
 
 
 # ── /wordlestop ───────────────────────────────────────────────────────────────
